@@ -1,9 +1,21 @@
+use crate::camera::Camera;
+use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
+use glam::{Vec3, Vec4};
 use std::collections::HashMap;
-use std::sync::Arc;
-use wgpu::{Adapter, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState, ColorTargetState, ColorWrites, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device, Features, FragmentState, FrontFace, include_wgsl, Instance, InstanceDescriptor, Limits, Maintain, MaintainBase, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange, Queue, RenderPipeline, RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages, StorageTextureAccess, Surface, SurfaceConfiguration, TextureAspect, TextureFormat, TextureUsages, TextureViewDescriptor, TextureViewDimension, VertexState};
-use winit::event_loop::ActiveEventLoop;
 use std::future::Future;
+use std::sync::Arc;
+use wgpu::util::{BufferInitDescriptor, DeviceExt};
+use wgpu::{
+    include_wgsl, Adapter, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer,
+    BufferBindingType, BufferUsages, ComputePassDescriptor, ComputePipeline,
+    ComputePipelineDescriptor, Device, Features, Instance, InstanceDescriptor, Limits, Maintain,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PushConstantRange, Queue, ShaderStages,
+    StorageTextureAccess, Surface, SurfaceConfiguration, TextureFormat, TextureUsages,
+    TextureViewDescriptor, TextureViewDimension,
+};
 use winit::dpi::PhysicalSize;
+use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
 pub struct Graphics {
@@ -15,13 +27,23 @@ pub struct Graphics {
     device: Device,
     queue: Queue,
     overrides: Overrides,
+    vertices: Buffer,
+    indices: Buffer,
+    world_bind_group: BindGroup,
     compute_pipeline: ComputePipeline,
-    // render_pipeline: RenderPipeline,
 }
 
 struct Overrides {
     rt_wgs_x: u32,
     rt_wgs_y: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct Vertex {
+    position: Vec3,
+    reflectivity: f32,
+    color: Vec4,
 }
 
 impl Graphics {
@@ -30,22 +52,21 @@ impl Graphics {
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
     }
-    pub fn draw(&mut self) {
-
+    pub fn draw(&mut self, camera: &Camera, current_frame: u32) {
         let frame = self.surface.get_current_texture().unwrap();
         let texture = &frame.texture;
-        let x = texture.width().div_ceil(16);
-        let y = texture.height().div_ceil(16);
+        let width = texture.width();
+        let height = texture.height();
+        let x = width.div_ceil(self.overrides.rt_wgs_x);
+        let y = height.div_ceil(self.overrides.rt_wgs_y);
         let view = texture.create_view(&TextureViewDescriptor::default());
-        let bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+        let texture_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: None,
-            layout: &self.compute_pipeline.get_bind_group_layout(0),
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::TextureView(&view),
-                }
-            ],
+            layout: &self.compute_pipeline.get_bind_group_layout(1),
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::TextureView(&view),
+            }],
         });
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -55,21 +76,27 @@ impl Graphics {
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.compute_pipeline);
-            cpass.set_bind_group(
+            cpass.set_push_constants(
                 0,
-                &bind_group,
-                &[]
+                bytes_of(&PushConstants::new(camera, width, height, current_frame)),
             );
+            cpass.set_bind_group(0, &self.world_bind_group, &[]);
+            cpass.set_bind_group(1, &texture_bind_group, &[]);
             cpass.dispatch_workgroups(x, y, 1);
         }
 
         let command_buffer = encoder.finish();
-        self.device.poll(Maintain::WaitForSubmissionIndex(self.queue.submit([command_buffer])));
+        self.device.poll(Maintain::WaitForSubmissionIndex(
+            self.queue.submit([command_buffer]),
+        ));
         frame.present();
+    }
+    pub fn request_redraw(&self) {
+        self.window.request_redraw();
     }
 }
 
-pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output =Graphics> + 'static {
+pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Graphics> + 'static {
     let instance = Instance::new(InstanceDescriptor {
         backends: Backends::VULKAN,
         ..Default::default()
@@ -78,9 +105,7 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output =Grap
     let window_attrs = Window::default_attributes();
 
     let window = Arc::new(event_loop.create_window(window_attrs).unwrap());
-    let surface = instance
-        .create_surface(window.clone())
-        .unwrap();
+    let surface = instance.create_surface(window.clone()).unwrap();
 
     async move {
         let adapter = instance
@@ -92,7 +117,10 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output =Grap
             .await
             .unwrap();
 
-        assert!(surface.get_capabilities(&adapter).usages.contains(TextureUsages::STORAGE_BINDING));
+        assert!(surface
+            .get_capabilities(&adapter)
+            .usages
+            .contains(TextureUsages::STORAGE_BINDING));
 
         let (device, queue) = adapter
             .request_device(
@@ -118,9 +146,109 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output =Grap
 
         surface.configure(&device, &config);
 
-        let raytrace_shader = device.create_shader_module(include_wgsl!("../assets/shaders/raytracer.wgsl"));
+        let raytrace_shader =
+            device.create_shader_module(include_wgsl!("../assets/shaders/raytracer.wgsl"));
 
-        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        let overrides = Overrides {
+            rt_wgs_x: 8,
+            rt_wgs_y: 8,
+        };
+
+        let world_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let vertices = device.create_buffer_init(&BufferInitDescriptor {
+            label: None,
+            contents: cast_slice(&[
+                //  0
+                Vertex {
+                    position: Vec3::new(-1.5, 1., -0.5),
+                    reflectivity: 0.,
+                    color: Vec4::new(1., 0., 0., 1.),
+                },
+                //  1
+                Vertex {
+                    position: Vec3::new(-1., -1., 0.),
+                    reflectivity: 0.,
+                    color: Vec4::new(1., 0., 0., 1.),
+                },
+                //  2
+                Vertex {
+                    position: Vec3::new(-0.5, 1., 0.5),
+                    reflectivity: 0.,
+                    color: Vec4::new(1., 1., 0., 1.),
+                },
+                //  3
+                Vertex {
+                    position: Vec3::new(0., -1., 1.),
+                    reflectivity: 0.,
+                    color: Vec4::new(0., 1., 0., 1.),
+                },
+                //  4
+                Vertex {
+                    position: Vec3::new(0.5, 1., 1.5),
+                    reflectivity: 0.,
+                    color: Vec4::new(0., 1., 1., 1.),
+                },
+                //  5
+                Vertex {
+                    position: Vec3::new(1., -1., 2.),
+                    reflectivity: 0.,
+                    color: Vec4::new(0., 0., 1., 1.),
+                },
+                //  6
+                Vertex {
+                    position: Vec3::new(1.5, 1., 2.5),
+                    reflectivity: 0.,
+                    color: Vec4::new(0., 0., 1., 1.),
+                },
+            ]),
+            usage: BufferUsages::STORAGE,
+        });
+        let indices = device.create_buffer_init(&BufferInitDescriptor {
+            label: None,
+            contents: cast_slice(&[0, 1, 2, 3, 4, 5, 6]),
+            usage: BufferUsages::STORAGE,
+        });
+
+        let world_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: &world_bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: vertices.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: indices.as_entire_binding(),
+                },
+            ],
+        });
+        let frame_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: None,
             entries: &[BindGroupLayoutEntry {
                 binding: 0,
@@ -133,20 +261,15 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output =Grap
                 count: None,
             }],
         });
-        let overrides = Overrides {
-            rt_wgs_x: 16,
-            rt_wgs_y: 16,
-        };
         let compute_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: None,
             layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[
-                    &bind_group_layout
-                ],
-                push_constant_ranges: &[
-                    // PushConstantRange { stages: ShaderStages::COMPUTE, range: 0..1 }
-                ],
+                bind_group_layouts: &[&world_bind_group_layout, &frame_bind_group_layout],
+                push_constant_ranges: &[PushConstantRange {
+                    stages: ShaderStages::COMPUTE,
+                    range: 0..std::mem::size_of::<PushConstants>() as u32,
+                }],
             })),
             module: &raytrace_shader,
             entry_point: "raytrace",
@@ -205,6 +328,9 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output =Grap
             device,
             queue,
             overrides,
+            vertices,
+            indices,
+            world_bind_group,
             compute_pipeline,
             // render_pipeline,
         }
@@ -232,4 +358,39 @@ pub mod wgpu_surface {
             dependent: Surface,
         }
     );
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+pub struct PushConstants {
+    focus: Vec3,
+    view_distance: f32,
+    base: Vec3,
+    frame: u32,
+    horizontal: Vec3,
+    _padding2: u32,
+    vertical: Vec3,
+    _padding3: u32,
+}
+
+impl PushConstants {
+    pub fn new(camera: &Camera, screen_width: u32, screen_height: u32, frame: u32) -> Self {
+        let hw = (0.5 * camera.view_angles.x).tan();
+        let hh = (0.5 * camera.view_angles.y).tan();
+        let base = Vec3::new(
+            -hw + hw / (screen_width as f32),
+            hh - hh / (screen_height as f32),
+            1.,
+        );
+        Self {
+            focus: camera.position,
+            view_distance: camera.view_distance,
+            base: camera.position + camera.orientation * base,
+            frame,
+            horizontal: camera.orientation * (2.0 * Vec3::X * hw / screen_width as f32),
+            _padding2: 0,
+            vertical: camera.orientation * (2.0 * Vec3::NEG_Y * hh / screen_height as f32),
+            _padding3: 0,
+        }
+    }
 }

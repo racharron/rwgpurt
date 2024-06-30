@@ -13,5 +13,6 @@ env_logger = "*"
 pollster = "*"
 rand = "*"
 glam = { version = "*", features = ["bytemuck", "rand"] }
+hashbrown = { version = "*" }
 self_cell = "1"
 bytemuck = { version = "1", features = ["derive"] }
