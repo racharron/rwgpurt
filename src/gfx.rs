@@ -18,6 +18,14 @@ use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
+struct WorldBuffers {
+    indices: Buffer,
+    position: Buffer,
+    diffuse: Buffer,
+    specular: Buffer,
+    emissivity: Buffer,
+}
+
 pub struct Graphics {
     instance: Instance,
     window: Arc<Window>,
@@ -26,9 +34,8 @@ pub struct Graphics {
     adapter: Adapter,
     device: Device,
     queue: Queue,
+    buffers: WorldBuffers,
     overrides: Overrides,
-    vertices: Buffer,
-    indices: Buffer,
     world_bind_group: BindGroup,
     compute_pipeline: ComputePipeline,
 }
@@ -38,13 +45,54 @@ struct Overrides {
     rt_wgs_y: u32,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Pod, Zeroable)]
-pub struct Vertex {
-    position: Vec3,
-    reflectivity: f32,
-    color: Vec4,
-}
+const INDICES: [u32; 7] = [0, 1, 2, 3, 4, 5, 6];
+
+const VERTEX_POSITIONS: [Vec3; 7] = [
+    //  0
+    Vec3::new(-2., 1., 1.),
+    //  1
+    Vec3::new(-2., -1., 2.),
+    //  2
+    Vec3::new(-1., 1., 3.),
+    //  3
+    Vec3::new(0., -1., 3.),
+    //  4
+    Vec3::new(1., 1., 3.),
+    //  5
+    Vec3::new(2., -1., 2.),
+    //  6
+    Vec3::new(2., 1., 1.),
+];
+
+const VERTEX_DIFFUSE: [Vec4; 7] = [
+    Vec4::new(-1.5, 1., -0.5, 0.25),
+    Vec4::new(-1., -1., 0., 0.5),
+    Vec4::new(-0.5, 1., 0.5, 0.75),
+    Vec4::new(0., -1., 1., 1.),
+    Vec4::new(0.5, 1., 1.5, 1.),
+    Vec4::new(1., -1., 2., 1.),
+    Vec4::new(1.5, 1., 2.5, 1.),
+];
+
+const VERTEX_SPECULAR: [Vec4; 7] = [
+    Vec4::new(-1.5, 1., -0.5, 1.),
+    Vec4::new(-1., -1., 0., 1.),
+    Vec4::new(-0.5, 1., 0.5, 1.),
+    Vec4::new(0., -1., 1., 1.),
+    Vec4::new(0.5, 1., 1.5, 0.75),
+    Vec4::new(1., -1., 2., 0.5),
+    Vec4::new(1.5, 1., 2.5, 0.25),
+];
+
+const VERTEX_EMISSIVITY: [Vec3; 7] = [
+    Vec3::ZERO,
+    Vec3::ZERO,
+    Vec3::ONE,
+    Vec3::ONE,
+    Vec3::ONE,
+    Vec3::ZERO,
+    Vec3::ZERO,
+];
 
 impl Graphics {
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -154,83 +202,65 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             rt_wgs_y: 8,
         };
 
+        let entry = BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+
         let world_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: None,
             entries: &[
                 BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+                    ..entry
                 },
                 BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+                    ..entry
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    ..entry
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    ..entry
+                },
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    ..entry
                 },
             ],
         });
-
-        let vertices = device.create_buffer_init(&BufferInitDescriptor {
-            label: None,
-            contents: cast_slice(&[
-                //  0
-                Vertex {
-                    position: Vec3::new(-1.5, 1., -0.5),
-                    reflectivity: 0.,
-                    color: Vec4::new(1., 0., 0., 1.),
-                },
-                //  1
-                Vertex {
-                    position: Vec3::new(-1., -1., 0.),
-                    reflectivity: 0.,
-                    color: Vec4::new(1., 0., 0., 1.),
-                },
-                //  2
-                Vertex {
-                    position: Vec3::new(-0.5, 1., 0.5),
-                    reflectivity: 0.,
-                    color: Vec4::new(1., 1., 0., 1.),
-                },
-                //  3
-                Vertex {
-                    position: Vec3::new(0., -1., 1.),
-                    reflectivity: 0.,
-                    color: Vec4::new(0., 1., 0., 1.),
-                },
-                //  4
-                Vertex {
-                    position: Vec3::new(0.5, 1., 1.5),
-                    reflectivity: 0.,
-                    color: Vec4::new(0., 1., 1., 1.),
-                },
-                //  5
-                Vertex {
-                    position: Vec3::new(1., -1., 2.),
-                    reflectivity: 0.,
-                    color: Vec4::new(0., 0., 1., 1.),
-                },
-                //  6
-                Vertex {
-                    position: Vec3::new(1.5, 1., 2.5),
-                    reflectivity: 0.,
-                    color: Vec4::new(0., 0., 1., 1.),
-                },
-            ]),
-            usage: BufferUsages::STORAGE,
-        });
         let indices = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
-            contents: cast_slice(&[0, 1, 2, 3, 4, 5, 6]),
+            contents: cast_slice(&INDICES),
+            usage: BufferUsages::STORAGE,
+        });
+        let position = device.create_buffer_init(&BufferInitDescriptor {
+            label: None,
+            contents: cast_slice(&VERTEX_POSITIONS.map(|p| p.extend(f32::NAN))),
+            usage: BufferUsages::STORAGE,
+        });
+        let diffuse = device.create_buffer_init(&BufferInitDescriptor {
+            label: None,
+            contents: cast_slice(&VERTEX_DIFFUSE),
+            usage: BufferUsages::STORAGE,
+        });
+        let specular = device.create_buffer_init(&BufferInitDescriptor {
+            label: None,
+            contents: cast_slice(&VERTEX_SPECULAR),
+            usage: BufferUsages::STORAGE,
+        });
+        let emissivity = device.create_buffer_init(&BufferInitDescriptor {
+            label: None,
+            contents: cast_slice(&VERTEX_EMISSIVITY.map(|e| e.extend(f32::NAN))),
             usage: BufferUsages::STORAGE,
         });
 
@@ -240,11 +270,23 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             entries: &[
                 BindGroupEntry {
                     binding: 0,
-                    resource: vertices.as_entire_binding(),
+                    resource: indices.as_entire_binding(),
                 },
                 BindGroupEntry {
                     binding: 1,
-                    resource: indices.as_entire_binding(),
+                    resource: position.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: diffuse.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: specular.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: emissivity.as_entire_binding(),
                 },
             ],
         });
@@ -278,46 +320,14 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
                 zero_initialize_workgroup_memory: false,
             },
         });
-        /*
-        let render_shader = device.create_shader_module(include_wgsl!("../assets/shaders/render.wgsl"));
-        let render_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: None,
-                bind_group_layouts: &[],
-                push_constant_ranges: &[],
-            })),
-            vertex: VertexState {
-                module: &render_shader,
-                entry_point: "vs_main",
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: PrimitiveState {
-                topology: PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                front_face: FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(FragmentState {
-                module: &render_shader,
-                entry_point: "fs_main",
-                compilation_options: Default::default(),
-                targets: &[
-                    Some(ColorTargetState {
-                        format: config.format,
-                        blend: Some(BlendState::REPLACE),
-                        write_mask: ColorWrites::ALL,
-                    })
-                ],
-            }),
-            multiview: None,
-        });*/
+
+        let buffers = WorldBuffers {
+            indices,
+            position,
+            diffuse,
+            specular,
+            emissivity,
+        };
 
         Graphics {
             instance,
@@ -327,12 +337,10 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             adapter,
             device,
             queue,
+            buffers,
             overrides,
-            vertices,
-            indices,
             world_bind_group,
             compute_pipeline,
-            // render_pipeline,
         }
     }
 }
