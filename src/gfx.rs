@@ -221,7 +221,6 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             })
             .await
             .unwrap();
-        assert_eq!(adapter.limits().min_subgroup_size, adapter.limits().max_subgroup_size);
         assert!(surface
             .get_capabilities(&adapter)
             .usages
