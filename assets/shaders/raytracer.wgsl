@@ -7,7 +7,17 @@ struct PushConstants {
     vertical: vec3<f32>,
 }
 
-var<push_constant> camera: PushConstants;
+struct Jitter {
+    offset: vec2<f32>,
+    rand: vec2<u32>,
+}
+
+struct MaterialParameters {
+    metallicity: f32,
+    roughness: f32,
+}
+
+var<push_constant> push_constants: PushConstants;
 
 /*
 override rt_wgs_x: u32;
@@ -17,49 +27,79 @@ override rt_wgs_y: u32;
 @group(0) @binding(0)
 var<storage, read> indices: array<u32>;
 
-@group(0) @binding(1)
-var<storage, read> vertex_positions: array<vec3<f32>>;
+@group(0) @binding(10)
+var<storage, read> positions: array<vec3<f32>>;
 
-@group(0) @binding(2)
-var<storage, read> vertex_diffuse: array<vec4<f32>>;
+//  Normals go here.
 
-@group(0) @binding(3)
-var<storage, read> vertex_specular: array<vec4<f32>>;
+@group(0) @binding(12)
+var<storage, read> diffuse: array<vec4<f32>>;
 
-@group(0) @binding(4)
-var<storage, read> vertex_emmisivity: array<vec3<f32>>;
+@group(0) @binding(13)
+var<storage, read> specular: array<vec4<f32>>;
+
+@group(0) @binding(14)
+var<storage, read> emmisivity: array<vec3<f32>>;
+
+@group(0) @binding(15)
+var<storage, read> parameters: array<MaterialParameters>;
 
 @group(1) @binding(0)
 var frame: texture_storage_2d<bgra8unorm, write>;
+
+@group(1) @binding(1)
+var<uniform> jitters: array<Jitter, SAMPLE_COUNT>;
 
 const rt_wgs_x: u32 = 8;
 const rt_wgs_y: u32 = 8;
 
 @compute @workgroup_size(rt_wgs_x, rt_wgs_y)
-//@compute @workgroup_size(16, 16)
 fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
-    if all(id.xy < textureDimensions(frame)) {
-        let origin = camera.origin_max.xyz;
-        let base = camera.base_uframe.xyz;
-        let frame_count = bitcast<u32>(camera.base_uframe);
-        let direction = normalize(base + f32(id.x) * camera.horizontal + f32(id.y) * camera.vertical - origin);
-        var depth = camera.origin_max.w;
-        var color = vec4(1.);
-        for (var i = 0u; i+2 < arrayLength(&indices); i++) {
-            let a = indices[i];
-            let b = indices[i+1];
-            let c = indices[i+2];
-            let intersection = intersection(
-                origin, direction,
-                vertex_positions[a], vertex_positions[b], vertex_positions[c],
+    let dimensions = textureDimensions(frame);
+    if all(id.xy < dimensions) {
+        let render_distance = push_constants.origin_max.w;
+        let index_count = arrayLength(&indices);
+        let origin = push_constants.origin_max.xyz;
+        let base = push_constants.base_uframe.xyz;
+        let frame_count = bitcast<u32>(push_constants.base_uframe);
+        let x = push_constants.horizontal;
+        let y = push_constants.vertical;
+        var pixel = vec3<f32>();
+        var pixel_error = vec3<f32>();
+        for (var s = 0u; s < SAMPLE_COUNT; s += 1u) {
+            var depth = render_distance;
+            var jitter = jitters[s].offset;
+            var direction = normalize(
+                base
+                + (f32(id.x) + jitter.x) * x
+                + (f32(id.y) + jitter.y) * y
+                - origin
             );
-            if intersection.intersects && intersection.position_distance.w < depth {
-                depth = intersection.position_distance.w;
-                color = (vertex_diffuse[a] + vertex_diffuse[b] + vertex_diffuse[c]) / 3.;
+            var color = miss(direction);
+            for (var tri = 0u; tri + 2 < index_count; tri += 1u) {
+                let a = indices[tri];
+                let b = indices[tri+1];
+                let c = indices[tri+2];
+                let intersection = intersection(
+                    origin, direction,
+                    positions[a], positions[b], positions[c],
+                );
+                if intersection.intersects && intersection.position_distance.w < depth {
+                    depth = intersection.position_distance.w;
+                    color = (diffuse[a].xyz + diffuse[b].xyz + diffuse[c].xyz) / 3.;
+                }
             }
+            let y = color - pixel_error;
+            let t = pixel + y;
+            pixel_error = (t - pixel) - y;
+            pixel = t;
         }
-        textureStore(frame, id.xy, color);
+        textureStore(frame, id.xy, vec4(pixel / f32(SAMPLE_COUNT), 1.));
     }
+}
+
+fn miss(direction: vec3<f32>) -> vec3<f32> {
+    return vec3(1.);
 }
 
 struct MaybeIntersection {
@@ -99,6 +139,14 @@ fn intersection(origin: vec3<f32>, direction: vec3<f32>, a: vec3<f32>, b: vec3<f
     } else { // This means that there is a line intersection but not a ray intersection.
         return MaybeIntersection(false, vec4<f32>());
     }
+}
+
+//  Generates a random number in the range (-0.5, 0.5). (Half Centered around Zero).
+fn gen_f32_hcz(rand: u32) -> f32 {
+    let exponent = 126u << 23;
+    let sign = 0x80000000 & rand;
+    let base = bitcast<f32>(exponent | (0x7FFFFF & rand));
+    return bitcast<f32>(sign | bitcast<u32>(base - 0.5));
 }
 
 /// Jarzynski and Olano prng

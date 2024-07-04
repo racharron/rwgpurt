@@ -1,22 +1,33 @@
+use std::borrow::Cow;
 use crate::camera::Camera;
 use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
-use glam::{Vec3, Vec4};
+use glam::{Vec2, Vec3, Vec4};
 use std::collections::HashMap;
 use std::future::Future;
+use std::mem::size_of;
 use std::sync::Arc;
+use rand::{Rng, SeedableRng};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
-use wgpu::{
-    include_wgsl, Adapter, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer,
-    BufferBindingType, BufferUsages, ComputePassDescriptor, ComputePipeline,
-    ComputePipelineDescriptor, Device, Features, Instance, InstanceDescriptor, Limits, Maintain,
-    PipelineCompilationOptions, PipelineLayoutDescriptor, PushConstantRange, Queue, ShaderStages,
-    StorageTextureAccess, Surface, SurfaceConfiguration, TextureFormat, TextureUsages,
-    TextureViewDescriptor, TextureViewDimension,
-};
+use wgpu::{include_wgsl, Adapter, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType, BufferUsages, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device, Features, Instance, InstanceDescriptor, Limits, Maintain, PipelineCompilationOptions, PipelineLayoutDescriptor, PushConstantRange, Queue, ShaderStages, StorageTextureAccess, Surface, SurfaceConfiguration, TextureFormat, TextureUsages, TextureViewDescriptor, TextureViewDimension, BufferDescriptor, ShaderModuleDescriptor, ShaderSource};
 use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
+
+const SAMPLES: usize = 32;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct MaterialParameters {
+    metallicity: f32,
+    roughness: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct Jitter {
+    offset: Vec2,
+    rand: u64,
+}
 
 struct WorldBuffers {
     indices: Buffer,
@@ -24,6 +35,15 @@ struct WorldBuffers {
     diffuse: Buffer,
     specular: Buffer,
     emissivity: Buffer,
+    material_parameters: Buffer,
+}
+
+struct JitterBuffers<R: Rng> {
+    samples: usize,
+    current: Buffer,
+    next: Buffer,
+    transfer: Buffer,
+    rng: R,
 }
 
 pub struct Graphics {
@@ -34,7 +54,8 @@ pub struct Graphics {
     adapter: Adapter,
     device: Device,
     queue: Queue,
-    buffers: WorldBuffers,
+    world_buffers: WorldBuffers,
+    jitter_buffers: JitterBuffers<rand::rngs::StdRng>,
     overrides: Overrides,
     world_bind_group: BindGroup,
     compute_pipeline: ComputePipeline,
@@ -85,13 +106,44 @@ const VERTEX_SPECULAR: [Vec4; 7] = [
 ];
 
 const VERTEX_EMISSIVITY: [Vec3; 7] = [
+    Vec3::splat(0.5),
     Vec3::ZERO,
     Vec3::ZERO,
     Vec3::ONE,
-    Vec3::ONE,
-    Vec3::ONE,
     Vec3::ZERO,
     Vec3::ZERO,
+    Vec3::splat(0.5),
+];
+
+const VERTEX_MATERIAL_PARAMETERS: [MaterialParameters; 7] = [
+    MaterialParameters {
+        metallicity: 0.,
+        roughness: 0.,
+    },
+    MaterialParameters {
+        metallicity: 1.,
+        roughness: 0.,
+    },
+    MaterialParameters {
+        metallicity: 0.,
+        roughness: 1.,
+    },
+    MaterialParameters {
+        metallicity: 0.5,
+        roughness: 0.5,
+    },
+    MaterialParameters {
+        metallicity: 1.,
+        roughness: 0.,
+    },
+    MaterialParameters {
+        metallicity: 0.,
+        roughness: 1.,
+    },
+    MaterialParameters {
+        metallicity: 1.,
+        roughness: 1.,
+    },
 ];
 
 impl Graphics {
@@ -111,12 +163,17 @@ impl Graphics {
         let texture_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: None,
             layout: &self.compute_pipeline.get_bind_group_layout(1),
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::TextureView(&view),
-            }],
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(&view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Buffer(self.jitter_buffers.get().as_entire_buffer_binding())
+                }
+            ],
         });
-
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut cpass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -164,12 +221,11 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             })
             .await
             .unwrap();
-
+        assert_eq!(adapter.limits().min_subgroup_size, adapter.limits().max_subgroup_size);
         assert!(surface
             .get_capabilities(&adapter)
             .usages
             .contains(TextureUsages::STORAGE_BINDING));
-
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
@@ -195,14 +251,20 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
         surface.configure(&device, &config);
 
         let raytrace_shader =
-            device.create_shader_module(include_wgsl!("../assets/shaders/raytracer.wgsl"));
+            device.create_shader_module(ShaderModuleDescriptor {
+                label: None,
+                source: ShaderSource::Wgsl(Cow::Borrowed(&std::fs::read_to_string("assets/shaders/raytracer.wgsl")
+                    .unwrap()
+                    .replace("SAMPLE_COUNT", &SAMPLES.to_string())
+                )),
+            });
 
         let overrides = Overrides {
             rt_wgs_x: 8,
             rt_wgs_y: 8,
         };
 
-        let entry = BindGroupLayoutEntry {
+        let read_buffer_entry = BindGroupLayoutEntry {
             binding: 0,
             visibility: ShaderStages::COMPUTE,
             ty: BindingType::Buffer {
@@ -218,23 +280,27 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             entries: &[
                 BindGroupLayoutEntry {
                     binding: 0,
-                    ..entry
+                    ..read_buffer_entry
                 },
                 BindGroupLayoutEntry {
-                    binding: 1,
-                    ..entry
+                    binding: 10,
+                    ..read_buffer_entry
                 },
                 BindGroupLayoutEntry {
-                    binding: 2,
-                    ..entry
+                    binding: 12,
+                    ..read_buffer_entry
                 },
                 BindGroupLayoutEntry {
-                    binding: 3,
-                    ..entry
+                    binding: 13,
+                    ..read_buffer_entry
                 },
                 BindGroupLayoutEntry {
-                    binding: 4,
-                    ..entry
+                    binding: 14,
+                    ..read_buffer_entry
+                },
+                BindGroupLayoutEntry {
+                    binding: 15,
+                    ..read_buffer_entry
                 },
             ],
         });
@@ -263,7 +329,11 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             contents: cast_slice(&VERTEX_EMISSIVITY.map(|e| e.extend(f32::NAN))),
             usage: BufferUsages::STORAGE,
         });
-
+        let material_parameters = device.create_buffer_init(&BufferInitDescriptor {
+            label: None,
+            contents: cast_slice(&VERTEX_MATERIAL_PARAMETERS),
+            usage: BufferUsages::STORAGE,
+        });
         let world_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: None,
             layout: &world_bind_group_layout,
@@ -273,35 +343,51 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
                     resource: indices.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: 1,
+                    binding: 10,
                     resource: position.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: 2,
+                    binding: 12,
                     resource: diffuse.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: 3,
+                    binding: 13,
                     resource: specular.as_entire_binding(),
                 },
                 BindGroupEntry {
-                    binding: 4,
+                    binding: 14,
                     resource: emissivity.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 15,
+                    resource: material_parameters.as_entire_binding(),
                 },
             ],
         });
         let frame_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: None,
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::StorageTexture {
-                    access: StorageTextureAccess::WriteOnly,
-                    format: config.format,
-                    view_dimension: TextureViewDimension::D2,
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: config.format,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         let compute_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: None,
@@ -310,7 +396,7 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
                 bind_group_layouts: &[&world_bind_group_layout, &frame_bind_group_layout],
                 push_constant_ranges: &[PushConstantRange {
                     stages: ShaderStages::COMPUTE,
-                    range: 0..std::mem::size_of::<PushConstants>() as u32,
+                    range: 0..size_of::<PushConstants>() as u32,
                 }],
             })),
             module: &raytrace_shader,
@@ -321,14 +407,16 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             },
         });
 
-        let buffers = WorldBuffers {
+        let world_buffers = WorldBuffers {
             indices,
             position,
             diffuse,
             specular,
             emissivity,
+            material_parameters,
         };
 
+        let jitter_buffers = JitterBuffers::new(&device, rand::rngs::StdRng::seed_from_u64(123), SAMPLES);
         Graphics {
             instance,
             window,
@@ -337,7 +425,8 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             adapter,
             device,
             queue,
-            buffers,
+            world_buffers,
+            jitter_buffers,
             overrides,
             world_bind_group,
             compute_pipeline,
@@ -354,18 +443,52 @@ impl Overrides {
     }
 }
 
-pub mod wgpu_surface {
-    use std::sync::Arc;
-    use wgpu::Surface;
-    use winit::window::Window;
-
-    self_cell::self_cell!(
-        pub struct WgpuSurface {
-            owner: Arc<Window>,
-            #[covariant]
-            dependent: Surface,
+impl<R: Rng> JitterBuffers<R> {
+    pub fn new(device: &Device, mut rng: R, samples: usize) -> Self {
+        let jitters = Self::new_jitters(&mut rng, samples);
+        let current = device.create_buffer_init(&BufferInitDescriptor {
+            label: None,
+            contents: cast_slice(jitters.as_slice()),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        });
+        let size = (jitters.len() * size_of::<Jitter>()) as _;
+        let next = device.create_buffer(&BufferDescriptor {
+            label: None,
+            size,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let transfer = device.create_buffer(&BufferDescriptor {
+            label: None,
+            size,
+            usage: BufferUsages::COPY_SRC | BufferUsages::MAP_WRITE,
+            mapped_at_creation: true,
+        });
+        JitterBuffers {
+            samples,
+            current,
+            next,
+            transfer,
+            rng,
         }
-    );
+    }
+
+    fn new_jitters(mut rng: &mut R, samples: usize) -> Vec<Jitter> {
+        use rand::distributions::*;
+        let dist = Uniform::new(-0.5, 0.5);
+        std::iter::repeat_with(|| {
+            let x = dist.sample(&mut rng);
+            let y = dist.sample(&mut rng);
+            let rand = rng.gen();
+            Jitter {
+                offset: Vec2::new(x, y),
+                rand,
+            }
+        }).take(samples).collect::<Vec<_>>()
+    }
+    pub fn get(&mut self) -> &Buffer {
+        &self.current
+    }
 }
 
 #[repr(C)]
