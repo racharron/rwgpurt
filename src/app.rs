@@ -72,8 +72,8 @@ impl ApplicationHandler for App {
                 let last_frame_time = now - *last_move;
                 *last_move = now;
                 camera.fly_around(keyboard.view(), last_frame_time);
-                graphics.draw(camera, metrics.current_frame(), rng.gen());
-                metrics.advance_frame();
+                let rt_time = graphics.draw(camera, metrics.current_frame(), rng.gen());
+                metrics.advance_frame(rt_time);
             }
             (App::Running { keyboard, .. }, WindowEvent::KeyboardInput { event, .. }) => {
                 keyboard.add_event(event)

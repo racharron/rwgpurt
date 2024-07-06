@@ -1,27 +1,15 @@
 use crate::camera::Camera;
-use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
+use bytemuck::{bytes_of, cast_slice, Pod, try_cast_slice, Zeroable};
 use glam::{Vec3, Vec4};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
 use std::mem::size_of;
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
-use wgpu::{
-    Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer,
-    BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
-    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
-    Device, Extent3d, Features, FragmentState, FrontFace, Instance, InstanceDescriptor,
-    InstanceFlags, Limits, LoadOp, Maintain, MultisampleState, Operations,
-    PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PresentMode, PrimitiveState,
-    PrimitiveTopology, PushConstantRange, QuerySet, QuerySetDescriptor, QueryType, Queue,
-    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
-    ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages, StorageTextureAccess,
-    StoreOp, Surface, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension,
-    TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor, TextureViewDimension,
-    VertexState,
-};
+use wgpu::{Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferAsyncError, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CommandEncoder, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device, Extent3d, Features, FragmentState, FrontFace, Instance, InstanceDescriptor, InstanceFlags, Limits, LoadOp, Maintain, MapMode, MultisampleState, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PresentMode, PrimitiveState, PrimitiveTopology, PushConstantRange, QuerySet, QuerySetDescriptor, QueryType, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages, StorageTextureAccess, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor, TextureViewDimension, VertexState};
 use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
@@ -198,7 +186,7 @@ impl Graphics {
         );
     }
 
-    pub fn draw(&mut self, camera: &Camera, current_frame: u32, rand: u32) {
+    pub fn draw(&mut self, camera: &Camera, current_frame: u32, rand: u32) -> Duration {
         let frame = self.renderer.surface.get_current_texture().unwrap();
         assert!(!frame.suboptimal);
         let texture = &frame.texture;
@@ -230,9 +218,11 @@ impl Graphics {
             cpass.dispatch_workgroups(x, y, 1);
         }
         compute_encoder.write_timestamp(&self.timestamp_resources.query_set, 1);
-        self.device.poll(Maintain::WaitForSubmissionIndex(
-            self.queue.submit([compute_encoder.finish()]),
-        ));
+        self.timestamp_resources.do_read(&mut compute_encoder);
+        self.queue.submit([compute_encoder.finish()]);
+        let slice = self.timestamp_resources.transfer_buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        slice.map_async(MapMode::Read, move |res| sender.send(res).unwrap());
         let mut render_encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor::default());
@@ -263,6 +253,14 @@ impl Graphics {
             self.queue.submit([render_encoder.finish()]),
         ));
         frame.present();
+        receiver.recv().unwrap().unwrap();
+        let time = {
+            let timestamps = slice.get_mapped_range();
+            let timestamps = try_cast_slice::<u8, u64>(&timestamps[..]).unwrap();
+            timestamps[1].wrapping_sub(timestamps[0]) as f32 * self.queue.get_timestamp_period()
+        };
+        self.timestamp_resources.transfer_buffer.unmap();
+        Duration::from_nanos(time.round() as u64)
     }
     pub fn request_redraw(&self) {
         self.renderer.window.request_redraw();
@@ -671,6 +669,16 @@ impl TimestampResources {
             query_buffer,
             transfer_buffer,
         }
+    }
+    pub fn do_read(&self, encoder: &mut CommandEncoder) {
+        encoder.resolve_query_set(&self.query_set, 0..2, &self.query_buffer, 0);
+        encoder.copy_buffer_to_buffer(
+            &self.query_buffer,
+            0,
+            &self.transfer_buffer,
+            0,
+            size_of::<[u64; 2]>() as _
+        );
     }
 }
 
