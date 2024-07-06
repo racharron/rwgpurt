@@ -1,14 +1,27 @@
 use crate::camera::Camera;
 use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
-use glam::{Vec2, Vec3, Vec4};
-use rand::{Rng, SeedableRng};
+use glam::{Vec3, Vec4};
 use std::borrow::Cow;
-use std::collections::{HashMap, LinkedList};
+use std::collections::HashMap;
 use std::future::Future;
 use std::mem::size_of;
 use std::sync::Arc;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
-use wgpu::{include_wgsl, Adapter, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device, Extent3d, Features, FragmentState, FrontFace, Id, Instance, InstanceDescriptor, Limits, Maintain, MultisampleState, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PresentMode, PrimitiveState, PrimitiveTopology, PushConstantRange, QuerySet, QuerySetDescriptor, QueryType, Queue, RenderPipeline, RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages, StorageTextureAccess, SubmissionIndex, Surface, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor, TextureViewDimension, VertexState, RenderPassDescriptor, RenderPassColorAttachment, Operations, LoadOp, StoreOp, InstanceFlags};
+use wgpu::{
+    Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer,
+    BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
+    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
+    Device, Extent3d, Features, FragmentState, FrontFace, Instance, InstanceDescriptor,
+    InstanceFlags, Limits, LoadOp, Maintain, MultisampleState, Operations,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PresentMode, PrimitiveState,
+    PrimitiveTopology, PushConstantRange, QuerySet, QuerySetDescriptor, QueryType, Queue,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
+    ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages, StorageTextureAccess,
+    StoreOp, Surface, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor, TextureViewDimension,
+    VertexState,
+};
 use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
@@ -20,13 +33,6 @@ const SAMPLES: usize = 32;
 struct MaterialParameters {
     metallicity: f32,
     roughness: f32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct Jitter {
-    offset: Vec2,
-    rand: u64,
 }
 
 struct WorldBuffers {
@@ -47,7 +53,6 @@ struct TimestampResources {
 pub struct Raytracer {
     pipeline: ComputePipeline,
     shader: ShaderModule,
-    world_buffers: WorldBuffers,
     world_bind_group: BindGroup,
     output_bind_group: BindGroup,
 }
@@ -62,9 +67,7 @@ pub struct Renderer {
 }
 
 pub struct Graphics {
-    instance: Instance,
     renderer: Renderer,
-    adapter: Adapter,
     device: Device,
     queue: Queue,
     timestamp_resources: TimestampResources,
@@ -179,7 +182,7 @@ impl Graphics {
             &self.device,
             self.renderer.config.format,
             &self.renderer.shader,
-            &self.renderer.pipeline.get_bind_group_layout(0)
+            &self.renderer.pipeline.get_bind_group_layout(0),
         );
         self.raytracer.output_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: None,
@@ -227,19 +230,24 @@ impl Graphics {
             cpass.dispatch_workgroups(x, y, 1);
         }
         compute_encoder.write_timestamp(&self.timestamp_resources.query_set, 1);
-        self.device.poll(Maintain::WaitForSubmissionIndex(self.queue.submit([compute_encoder.finish()])));
-        let mut render_encoder = self.device.create_command_encoder(&CommandEncoderDescriptor::default());
+        self.device.poll(Maintain::WaitForSubmissionIndex(
+            self.queue.submit([compute_encoder.finish()]),
+        ));
+        let mut render_encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor::default());
         {
             let view = texture.create_view(&TextureViewDescriptor::default());
             let mut render_pass = render_encoder.begin_render_pass(&RenderPassDescriptor {
                 label: None,
-                color_attachments: &[
-                    Some(RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: Operations { load: LoadOp::Clear(Default::default()), store: StoreOp::Store },
-                    })
-                ],
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(Default::default()),
+                        store: StoreOp::Store,
+                    },
+                })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
@@ -247,11 +255,13 @@ impl Graphics {
             render_pass.set_pipeline(&self.renderer.pipeline);
             render_pass.set_bind_group(0, &self.renderer.input_bind_group, &[]);
             render_pass.draw(0..3, 0..1);
-        }/*
+        } /*
+          self.device.poll(Maintain::WaitForSubmissionIndex(
+              self.queue.submit([compute_encoder.finish(), render_encoder.finish()]),
+          ));*/
         self.device.poll(Maintain::WaitForSubmissionIndex(
-            self.queue.submit([compute_encoder.finish(), render_encoder.finish()]),
-        ));*/
-        self.device.poll(Maintain::WaitForSubmissionIndex(self.queue.submit([render_encoder.finish()])));
+            self.queue.submit([render_encoder.finish()]),
+        ));
         frame.present();
     }
     pub fn request_redraw(&self) {
@@ -307,7 +317,11 @@ impl Graphics {
 pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Graphics> + 'static {
     let instance = Instance::new(InstanceDescriptor {
         backends: Backends::VULKAN,
-        flags: if cfg!(debug_assertions) { InstanceFlags::advanced_debugging() } else { InstanceFlags::empty() },
+        flags: if cfg!(debug_assertions) {
+            InstanceFlags::advanced_debugging()
+        } else {
+            InstanceFlags::empty()
+        },
         ..Default::default()
     });
 
@@ -521,7 +535,6 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
         };
 
         let raytracer = Raytracer {
-            world_buffers,
             world_bind_group,
             pipeline: compute_pipeline,
             output_bind_group,
@@ -529,9 +542,7 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
         };
 
         Graphics {
-            instance,
             renderer,
-            adapter,
             device,
             queue,
             raytracer,

@@ -1,4 +1,3 @@
-use gfx::PushConstants;
 use winit::event_loop::{ControlFlow, EventLoop};
 
 mod app;

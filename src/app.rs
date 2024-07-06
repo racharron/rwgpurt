@@ -23,18 +23,11 @@ pub enum App {
     },
 }
 
-impl App {
-    pub fn take(&mut self) -> Self {
-        std::mem::replace(self, App::Empty)
-    }
-}
-
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let App::Empty = self else { return };
         let last_move = Instant::now();
         let graphics = pollster::block_on(create_graphics(event_loop));
-        let now = Instant::now();
         *self = App::Running {
             graphics,
             keyboard: KeyboardState::new(),
@@ -50,7 +43,7 @@ impl ApplicationHandler for App {
         };
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: ()) {
+    fn user_event(&mut self, _: &ActiveEventLoop, _: ()) {
         let App::Running { graphics, .. } = self else {
             return;
         };
@@ -89,7 +82,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
         let App::Running { graphics, .. } = self else {
             return;
         };
