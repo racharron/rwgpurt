@@ -1,14 +1,19 @@
 const EPSILON: f32 = pow(2., -23.);
+//  Plastic number, or the second most irrational number
+//  See "The Unreasonable Effectiveness of Quasirandom Sequences"
+const PHI_2: f32 = 1.32471795724474602596;
+const A_1: f32 = 1. / PHI_2;
+const A_2: f32 = 1. / (PHI_2*PHI_2);
 
 struct PushConstants {
     origin_max: vec4<f32>,
     base_uframe: vec4<f32>,
-    horizontal: vec3<f32>,
-    vertical: vec3<f32>,
+    horizontal_rand: vec4<f32>,
+    vertical: vec4<f32>,
 }
 
-struct Jitter {
-    offset: vec2<f32>,
+struct SampleAuxiliary {
+    jitter: vec2<f32>,
     rand: vec2<u32>,
 }
 
@@ -45,30 +50,28 @@ var<storage, read> emmisivity: array<vec3<f32>>;
 var<storage, read> parameters: array<MaterialParameters>;
 
 @group(1) @binding(0)
-var frame: texture_storage_2d<bgra8unorm, write>;
-
-@group(1) @binding(1)
-var<uniform> jitters: array<Jitter, SAMPLE_COUNT>;
+var output: texture_storage_2d<rgba32float, write>;
 
 const rt_wgs_x: u32 = 8;
 const rt_wgs_y: u32 = 8;
 
 @compute @workgroup_size(rt_wgs_x, rt_wgs_y)
 fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
-    let dimensions = textureDimensions(frame);
+    let dimensions = textureDimensions(output);
     if all(id.xy < dimensions) {
         let render_distance = push_constants.origin_max.w;
         let index_count = arrayLength(&indices);
         let origin = push_constants.origin_max.xyz;
         let base = push_constants.base_uframe.xyz;
         let frame_count = bitcast<u32>(push_constants.base_uframe);
-        let x = push_constants.horizontal;
-        let y = push_constants.vertical;
+        let x = push_constants.horizontal_rand.xyz;
+        let y = push_constants.vertical.xyz;
+        let rand = pcg3d(vec3(id.xy, bitcast<u32>(push_constants.horizontal_rand.z)));
         var pixel = vec3<f32>();
         var pixel_error = vec3<f32>();
         for (var s = 0u; s < SAMPLE_COUNT; s += 1u) {
             var depth = render_distance;
-            var jitter = jitters[s].offset;
+            var jitter = quasirandom((rand.z & 0xFF) * SAMPLE_COUNT + s);
             var direction = normalize(
                 base
                 + (f32(id.x) + jitter.x) * x
@@ -94,7 +97,7 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
             pixel_error = (t - pixel) - y;
             pixel = t;
         }
-        textureStore(frame, id.xy, vec4(pixel / f32(SAMPLE_COUNT), 1.));
+        textureStore(output, id.xy, vec4(pixel / f32(SAMPLE_COUNT), 1.));
     }
 }
 
@@ -172,4 +175,8 @@ fn pcg4d(input: vec4<u32>) -> vec4<u32> {
     v ^= v >> vec4(16);
     v.x += v.y*v.w; v.y += v.z*v.x; v.z += v.x*v.y; v.w += v.y*v.z;
     return v;
+}
+
+fn quasirandom(n: u32) -> vec2<f32> {
+    return (vec2(A_1 * f32(n), A_2 * f32(n)) + 0.5) % 1;
 }

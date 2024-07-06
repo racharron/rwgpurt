@@ -3,11 +3,12 @@ use crate::gfx::*;
 use crate::input::KeyboardState;
 use crate::metrics::Metrics;
 use glam::{Quat, Vec2, Vec3};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::{KeyEvent, WindowEvent};
+use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
-use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::WindowId;
 
 pub enum App {
@@ -18,6 +19,7 @@ pub enum App {
         camera: Camera,
         metrics: Metrics,
         last_move: Instant,
+        rng: StdRng,
     },
 }
 
@@ -44,6 +46,7 @@ impl ApplicationHandler for App {
             },
             metrics: Metrics::new(),
             last_move,
+            rng: StdRng::seed_from_u64(123),
         };
     }
 
@@ -54,12 +57,7 @@ impl ApplicationHandler for App {
         graphics.request_redraw();
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        window_id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match (self, event) {
             (_, WindowEvent::CloseRequested) => event_loop.exit(),
             (App::Empty, _) => {}
@@ -73,6 +71,7 @@ impl ApplicationHandler for App {
                     keyboard,
                     metrics,
                     last_move,
+                    rng,
                 },
                 WindowEvent::RedrawRequested,
             ) => {
@@ -80,7 +79,7 @@ impl ApplicationHandler for App {
                 let last_frame_time = now - *last_move;
                 *last_move = now;
                 camera.fly_around(keyboard.view(), last_frame_time);
-                graphics.draw(camera, metrics.current_frame());
+                graphics.draw(camera, metrics.current_frame(), rng.gen());
                 metrics.advance_frame();
             }
             (App::Running { keyboard, .. }, WindowEvent::KeyboardInput { event, .. }) => {

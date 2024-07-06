@@ -1,14 +1,14 @@
-use std::borrow::Cow;
 use crate::camera::Camera;
 use bytemuck::{bytes_of, cast_slice, Pod, Zeroable};
 use glam::{Vec2, Vec3, Vec4};
-use std::collections::HashMap;
+use rand::{Rng, SeedableRng};
+use std::borrow::Cow;
+use std::collections::{HashMap, LinkedList};
 use std::future::Future;
 use std::mem::size_of;
 use std::sync::Arc;
-use rand::{Rng, SeedableRng};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
-use wgpu::{include_wgsl, Adapter, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferBindingType, BufferUsages, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device, Features, Instance, InstanceDescriptor, Limits, Maintain, PipelineCompilationOptions, PipelineLayoutDescriptor, PushConstantRange, Queue, ShaderStages, StorageTextureAccess, Surface, SurfaceConfiguration, TextureFormat, TextureUsages, TextureViewDescriptor, TextureViewDimension, BufferDescriptor, ShaderModuleDescriptor, ShaderSource};
+use wgpu::{include_wgsl, Adapter, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferAddress, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device, Extent3d, Features, FragmentState, FrontFace, Id, Instance, InstanceDescriptor, Limits, Maintain, MultisampleState, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PresentMode, PrimitiveState, PrimitiveTopology, PushConstantRange, QuerySet, QuerySetDescriptor, QueryType, Queue, RenderPipeline, RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages, StorageTextureAccess, SubmissionIndex, Surface, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor, TextureViewDimension, VertexState, RenderPassDescriptor, RenderPassColorAttachment, Operations, LoadOp, StoreOp, InstanceFlags};
 use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
@@ -38,27 +38,38 @@ struct WorldBuffers {
     material_parameters: Buffer,
 }
 
-struct JitterBuffers<R: Rng> {
-    samples: usize,
-    current: Buffer,
-    next: Buffer,
-    transfer: Buffer,
-    rng: R,
+struct TimestampResources {
+    query_set: QuerySet,
+    query_buffer: Buffer,
+    transfer_buffer: Buffer,
+}
+
+pub struct Raytracer {
+    pipeline: ComputePipeline,
+    shader: ShaderModule,
+    world_buffers: WorldBuffers,
+    world_bind_group: BindGroup,
+    output_bind_group: BindGroup,
+}
+
+pub struct Renderer {
+    window: Arc<Window>,
+    surface: Surface<'static>,
+    config: SurfaceConfiguration,
+    pipeline: RenderPipeline,
+    shader: ShaderModule,
+    input_bind_group: BindGroup,
 }
 
 pub struct Graphics {
     instance: Instance,
-    window: Arc<Window>,
-    surface: Surface<'static>,
-    config: SurfaceConfiguration,
+    renderer: Renderer,
     adapter: Adapter,
     device: Device,
     queue: Queue,
-    world_buffers: WorldBuffers,
-    jitter_buffers: JitterBuffers<rand::rngs::StdRng>,
+    timestamp_resources: TimestampResources,
     overrides: Overrides,
-    world_bind_group: BindGroup,
-    compute_pipeline: ComputePipeline,
+    raytracer: Raytracer,
 }
 
 struct Overrides {
@@ -148,62 +159,155 @@ const VERTEX_MATERIAL_PARAMETERS: [MaterialParameters; 7] = [
 
 impl Graphics {
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
-        self.config.width = size.width;
-        self.config.height = size.height;
-        self.surface.configure(&self.device, &self.config);
+        self.renderer.config.width = size.width;
+        self.renderer.config.height = size.height;
+        self.renderer
+            .surface
+            .configure(&self.device, &self.renderer.config);
+        let interface = new_interface_texture(&self.device, size);
+        let view = interface.create_view(&TextureViewDescriptor::default());
+        let entries = &[BindGroupEntry {
+            binding: 0,
+            resource: BindingResource::TextureView(&view),
+        }];
+        self.renderer.input_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: &self.renderer.pipeline.get_bind_group_layout(0),
+            entries,
+        });
+        self.renderer.pipeline = Self::new_render_pipeline(
+            &self.device,
+            self.renderer.config.format,
+            &self.renderer.shader,
+            &self.renderer.pipeline.get_bind_group_layout(0)
+        );
+        self.raytracer.output_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: &self.raytracer.pipeline.get_bind_group_layout(1),
+            entries,
+        });
+        self.raytracer.pipeline = new_raytracer_pipeline(
+            &self.device,
+            &self.raytracer.shader,
+            &self.overrides,
+            &self.raytracer.pipeline.get_bind_group_layout(0),
+            &self.raytracer.pipeline.get_bind_group_layout(1),
+        );
     }
-    pub fn draw(&mut self, camera: &Camera, current_frame: u32) {
-        let frame = self.surface.get_current_texture().unwrap();
+
+    pub fn draw(&mut self, camera: &Camera, current_frame: u32, rand: u32) {
+        let frame = self.renderer.surface.get_current_texture().unwrap();
+        assert!(!frame.suboptimal);
         let texture = &frame.texture;
         let width = texture.width();
         let height = texture.height();
         let x = width.div_ceil(self.overrides.rt_wgs_x);
         let y = height.div_ceil(self.overrides.rt_wgs_y);
-        let view = texture.create_view(&TextureViewDescriptor::default());
-        let texture_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
-            label: None,
-            layout: &self.compute_pipeline.get_bind_group_layout(1),
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::TextureView(&view),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: BindingResource::Buffer(self.jitter_buffers.get().as_entire_buffer_binding())
-                }
-            ],
-        });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut compute_encoder = self.device.create_command_encoder(&Default::default());
+        compute_encoder.write_timestamp(&self.timestamp_resources.query_set, 0);
         {
-            let mut cpass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            let mut cpass = compute_encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: None,
                 timestamp_writes: None,
             });
-            cpass.set_pipeline(&self.compute_pipeline);
+            cpass.set_pipeline(&self.raytracer.pipeline);
             cpass.set_push_constants(
                 0,
-                bytes_of(&PushConstants::new(camera, width, height, current_frame)),
+                bytes_of(&PushConstants::new(
+                    camera,
+                    width,
+                    height,
+                    current_frame,
+                    rand,
+                )),
             );
-            cpass.set_bind_group(0, &self.world_bind_group, &[]);
-            cpass.set_bind_group(1, &texture_bind_group, &[]);
+            cpass.set_bind_group(0, &self.raytracer.world_bind_group, &[]);
+            cpass.set_bind_group(1, &self.raytracer.output_bind_group, &[]);
+
             cpass.dispatch_workgroups(x, y, 1);
         }
-
-        let command_buffer = encoder.finish();
+        compute_encoder.write_timestamp(&self.timestamp_resources.query_set, 1);
+        self.device.poll(Maintain::WaitForSubmissionIndex(self.queue.submit([compute_encoder.finish()])));
+        let mut render_encoder = self.device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let view = texture.create_view(&TextureViewDescriptor::default());
+            let mut render_pass = render_encoder.begin_render_pass(&RenderPassDescriptor {
+                label: None,
+                color_attachments: &[
+                    Some(RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: Operations { load: LoadOp::Clear(Default::default()), store: StoreOp::Store },
+                    })
+                ],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            render_pass.set_pipeline(&self.renderer.pipeline);
+            render_pass.set_bind_group(0, &self.renderer.input_bind_group, &[]);
+            render_pass.draw(0..3, 0..1);
+        }/*
         self.device.poll(Maintain::WaitForSubmissionIndex(
-            self.queue.submit([command_buffer]),
-        ));
+            self.queue.submit([compute_encoder.finish(), render_encoder.finish()]),
+        ));*/
+        self.device.poll(Maintain::WaitForSubmissionIndex(self.queue.submit([render_encoder.finish()])));
         frame.present();
     }
     pub fn request_redraw(&self) {
-        self.window.request_redraw();
+        self.renderer.window.request_redraw();
+    }
+
+    fn new_render_pipeline(
+        device: &Device,
+        format: TextureFormat,
+        module: &ShaderModule,
+        bind_group_layout: &BindGroupLayout,
+    ) -> RenderPipeline {
+        let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&layout),
+            vertex: VertexState {
+                module,
+                entry_point: "vertex",
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: FrontFace::Cw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            fragment: Some(FragmentState {
+                module,
+                entry_point: "fragment",
+                compilation_options: Default::default(),
+                targets: &[Some(ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+        })
     }
 }
 
 pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Graphics> + 'static {
     let instance = Instance::new(InstanceDescriptor {
         backends: Backends::VULKAN,
+        flags: if cfg!(debug_assertions) { InstanceFlags::advanced_debugging() } else { InstanceFlags::empty() },
         ..Default::default()
     });
 
@@ -221,15 +325,14 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             })
             .await
             .unwrap();
-        assert!(surface
-            .get_capabilities(&adapter)
-            .usages
-            .contains(TextureUsages::STORAGE_BINDING));
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: None,
-                    required_features: Features::PUSH_CONSTANTS | Features::BGRA8UNORM_STORAGE,
+                    required_features: Features::PUSH_CONSTANTS
+                        | Features::BGRA8UNORM_STORAGE
+                        | Features::TIMESTAMP_QUERY
+                        | Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
                     required_limits: Limits {
                         max_push_constant_size: 128,
                         ..Default::default()
@@ -243,20 +346,27 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
         let mut config = surface
             .get_default_config(&adapter, size.width, size.height)
             .unwrap();
-        config.usage = TextureUsages::STORAGE_BINDING;
         //  TODO: check if Bgra8UnormSrgb can be used
-        config.format = TextureFormat::Bgra8Unorm;
+        config.present_mode = PresentMode::AutoVsync;
 
         surface.configure(&device, &config);
 
-        let raytrace_shader =
-            device.create_shader_module(ShaderModuleDescriptor {
-                label: None,
-                source: ShaderSource::Wgsl(Cow::Borrowed(&std::fs::read_to_string("assets/shaders/raytracer.wgsl")
+        let interface = new_interface_texture(&device, size);
+
+        let raytrace_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: None,
+            source: ShaderSource::Wgsl(Cow::Borrowed(
+                &std::fs::read_to_string("assets/shaders/raytracer.wgsl")
                     .unwrap()
-                    .replace("SAMPLE_COUNT", &SAMPLES.to_string())
-                )),
-            });
+                    .replace("SAMPLE_COUNT", &SAMPLES.to_string()),
+            )),
+        });
+        let render_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: None,
+            source: ShaderSource::Wgsl(Cow::Borrowed(
+                &std::fs::read_to_string("assets/shaders/render.wgsl").unwrap(),
+            )),
+        });
 
         let overrides = Overrides {
             rt_wgs_x: 8,
@@ -273,6 +383,8 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             },
             count: None,
         };
+
+        let world_buffers = WorldBuffers::new(&device);
 
         let world_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: None,
@@ -303,6 +415,177 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
                 },
             ],
         });
+        let world_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: &world_bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: world_buffers.indices.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 10,
+                    resource: world_buffers.position.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 12,
+                    resource: world_buffers.diffuse.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 13,
+                    resource: world_buffers.specular.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 14,
+                    resource: world_buffers.emissivity.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 15,
+                    resource: world_buffers.material_parameters.as_entire_binding(),
+                },
+            ],
+        });
+
+        let output_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: None,
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: interface.format(),
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                    count: None,
+                }],
+            });
+        let output_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: &output_bind_group_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::TextureView(
+                    &interface.create_view(&TextureViewDescriptor::default()),
+                ),
+            }],
+        });
+
+        let compute_pipeline = new_raytracer_pipeline(
+            &device,
+            &raytrace_shader,
+            &overrides,
+            &world_bind_group_layout,
+            &output_bind_group_layout,
+        );
+        let timestamp_resources = TimestampResources::new(&device);
+
+        let input_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: false },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let input_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: None,
+            layout: &input_bind_group_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::TextureView(
+                    &interface.create_view(&TextureViewDescriptor::default()),
+                ),
+            }],
+        });
+
+        let render_pipeline = Graphics::new_render_pipeline(
+            &device,
+            config.format,
+            &render_shader,
+            &input_bind_group_layout,
+        );
+
+        let renderer = Renderer {
+            window,
+            surface,
+            config,
+            pipeline: render_pipeline,
+            shader: render_shader,
+            input_bind_group,
+        };
+
+        let raytracer = Raytracer {
+            world_buffers,
+            world_bind_group,
+            pipeline: compute_pipeline,
+            output_bind_group,
+            shader: raytrace_shader,
+        };
+
+        Graphics {
+            instance,
+            renderer,
+            adapter,
+            device,
+            queue,
+            raytracer,
+            timestamp_resources,
+            overrides,
+        }
+    }
+}
+
+fn new_raytracer_pipeline(
+    device: &Device,
+    raytrace_shader: &ShaderModule,
+    overrides: &Overrides,
+    world_bind_group_layout: &BindGroupLayout,
+    output_bind_group_layout: &BindGroupLayout,
+) -> ComputePipeline {
+    device.create_compute_pipeline(&ComputePipelineDescriptor {
+        label: None,
+        layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&world_bind_group_layout, &output_bind_group_layout],
+            push_constant_ranges: &[PushConstantRange {
+                stages: ShaderStages::COMPUTE,
+                range: 0..size_of::<PushConstants>() as u32,
+            }],
+        })),
+        module: &raytrace_shader,
+        entry_point: "raytrace",
+        compilation_options: PipelineCompilationOptions {
+            constants: &overrides.get_map(),
+            zero_initialize_workgroup_memory: false,
+        },
+    })
+}
+
+fn new_interface_texture(device: &Device, size: PhysicalSize<u32>) -> Texture {
+    device.create_texture(&TextureDescriptor {
+        label: None,
+        size: Extent3d {
+            width: size.width,
+            height: size.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba32Float,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
+        view_formats: &[TextureFormat::Rgba32Float],
+    })
+}
+
+impl WorldBuffers {
+    pub fn new(device: &Device) -> Self {
         let indices = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
             contents: cast_slice(&INDICES),
@@ -333,102 +616,13 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             contents: cast_slice(&VERTEX_MATERIAL_PARAMETERS),
             usage: BufferUsages::STORAGE,
         });
-        let world_bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: None,
-            layout: &world_bind_group_layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: indices.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 10,
-                    resource: position.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 12,
-                    resource: diffuse.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 13,
-                    resource: specular.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 14,
-                    resource: emissivity.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 15,
-                    resource: material_parameters.as_entire_binding(),
-                },
-            ],
-        });
-        let frame_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: None,
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::StorageTexture {
-                        access: StorageTextureAccess::WriteOnly,
-                        format: config.format,
-                        view_dimension: TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-        let compute_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: None,
-            layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: None,
-                bind_group_layouts: &[&world_bind_group_layout, &frame_bind_group_layout],
-                push_constant_ranges: &[PushConstantRange {
-                    stages: ShaderStages::COMPUTE,
-                    range: 0..size_of::<PushConstants>() as u32,
-                }],
-            })),
-            module: &raytrace_shader,
-            entry_point: "raytrace",
-            compilation_options: PipelineCompilationOptions {
-                constants: &overrides.get_map(),
-                zero_initialize_workgroup_memory: false,
-            },
-        });
-
-        let world_buffers = WorldBuffers {
+        WorldBuffers {
             indices,
             position,
             diffuse,
             specular,
             emissivity,
             material_parameters,
-        };
-
-        let jitter_buffers = JitterBuffers::new(&device, rand::rngs::StdRng::seed_from_u64(123), SAMPLES);
-        Graphics {
-            instance,
-            window,
-            surface,
-            config,
-            adapter,
-            device,
-            queue,
-            world_buffers,
-            jitter_buffers,
-            overrides,
-            world_bind_group,
-            compute_pipeline,
         }
     }
 }
@@ -442,51 +636,30 @@ impl Overrides {
     }
 }
 
-impl<R: Rng> JitterBuffers<R> {
-    pub fn new(device: &Device, mut rng: R, samples: usize) -> Self {
-        let jitters = Self::new_jitters(&mut rng, samples);
-        let current = device.create_buffer_init(&BufferInitDescriptor {
+impl TimestampResources {
+    pub fn new(device: &Device) -> Self {
+        let query_set = device.create_query_set(&QuerySetDescriptor {
             label: None,
-            contents: cast_slice(jitters.as_slice()),
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            ty: QueryType::Timestamp,
+            count: 2,
         });
-        let size = (jitters.len() * size_of::<Jitter>()) as _;
-        let next = device.create_buffer(&BufferDescriptor {
+        let query_buffer = device.create_buffer(&BufferDescriptor {
             label: None,
-            size,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            size: size_of::<[u64; 2]>() as _,
+            usage: BufferUsages::QUERY_RESOLVE | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
-        let transfer = device.create_buffer(&BufferDescriptor {
+        let transfer_buffer = device.create_buffer(&BufferDescriptor {
             label: None,
-            size,
-            usage: BufferUsages::COPY_SRC | BufferUsages::MAP_WRITE,
-            mapped_at_creation: true,
+            size: size_of::<[u64; 2]>() as _,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        JitterBuffers {
-            samples,
-            current,
-            next,
-            transfer,
-            rng,
+        Self {
+            query_set,
+            query_buffer,
+            transfer_buffer,
         }
-    }
-
-    fn new_jitters(mut rng: &mut R, samples: usize) -> Vec<Jitter> {
-        use rand::distributions::*;
-        let dist = Uniform::new(-0.5, 0.5);
-        std::iter::repeat_with(|| {
-            let x = dist.sample(&mut rng);
-            let y = dist.sample(&mut rng);
-            let rand = rng.gen();
-            Jitter {
-                offset: Vec2::new(x, y),
-                rand,
-            }
-        }).take(samples).collect::<Vec<_>>()
-    }
-    pub fn get(&mut self) -> &Buffer {
-        &self.current
     }
 }
 
@@ -498,13 +671,19 @@ pub struct PushConstants {
     base: Vec3,
     frame: u32,
     horizontal: Vec3,
-    _padding2: u32,
+    rand: u32,
     vertical: Vec3,
     _padding3: u32,
 }
 
 impl PushConstants {
-    pub fn new(camera: &Camera, screen_width: u32, screen_height: u32, frame: u32) -> Self {
+    pub fn new(
+        camera: &Camera,
+        screen_width: u32,
+        screen_height: u32,
+        frame: u32,
+        rand: u32,
+    ) -> Self {
         let hw = (0.5 * camera.view_angles.x).tan();
         let hh = (0.5 * camera.view_angles.y).tan();
         let base = Vec3::new(
@@ -518,7 +697,7 @@ impl PushConstants {
             base: camera.position + camera.orientation * base,
             frame,
             horizontal: camera.orientation * (2.0 * Vec3::X * hw / screen_width as f32),
-            _padding2: 0,
+            rand,
             vertical: camera.orientation * (2.0 * Vec3::NEG_Y * hh / screen_height as f32),
             _padding3: 0,
         }
