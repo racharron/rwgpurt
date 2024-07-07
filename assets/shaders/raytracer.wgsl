@@ -12,14 +12,9 @@ struct PushConstants {
     vertical: vec4<f32>,
 }
 
-struct SampleAuxiliary {
-    jitter: vec2<f32>,
-    rand: vec2<u32>,
-}
-
-struct MaterialParameters {
-    metallicity: f32,
-    roughness: f32,
+struct MeshletData {
+    triangle_count: u32,
+    vertex_count: u32,
 }
 
 var<push_constant> push_constants: PushConstants;
@@ -30,24 +25,24 @@ override rt_wgs_y: u32;
 */
 
 @group(0) @binding(0)
-var<storage, read> indices: array<u32>;
+var<uniform> meshlet_data: MeshletData;
+
+@group(0) @binding(1)
+var<uniform> indices: array<vec4<u32>, MAX_INDEX_COUNT>;
 
 @group(0) @binding(10)
-var<storage, read> positions: array<vec3<f32>>;
+var<uniform> positions: array<vec3<f32>, MAX_VERTEX_COUNT>;
 
 //  Normals go here.
 
 @group(0) @binding(12)
-var<storage, read> diffuse: array<vec4<f32>>;
+var<uniform> diffuse: array<vec4<f32>, MAX_VERTEX_COUNT>;
 
 @group(0) @binding(13)
-var<storage, read> specular: array<vec4<f32>>;
+var<uniform> specular_metallicity: array<vec4<f32>, MAX_VERTEX_COUNT>;
 
 @group(0) @binding(14)
-var<storage, read> emmisivity: array<vec3<f32>>;
-
-@group(0) @binding(15)
-var<storage, read> parameters: array<MaterialParameters>;
+var<uniform> emmisivity_roughness: array<vec4<f32>, MAX_VERTEX_COUNT>;
 
 @group(1) @binding(0)
 var output: texture_storage_2d<rgba32float, write>;
@@ -60,7 +55,6 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
     let dimensions = textureDimensions(output);
     if all(id.xy < dimensions) {
         let render_distance = push_constants.origin_max.w;
-        let index_count = arrayLength(&indices);
         let origin = push_constants.origin_max.xyz;
         let base = push_constants.base_uframe.xyz;
         let frame_count = bitcast<u32>(push_constants.base_uframe);
@@ -79,10 +73,10 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
                 - origin
             );
             var color = miss(direction);
-            for (var tri = 0u; tri + 2 < index_count; tri += 1u) {
-                let a = indices[tri];
-                let b = indices[tri+1];
-                let c = indices[tri+2];
+            for (var tri = 0u; tri < meshlet_data.triangle_count; tri += 1u) {
+                let a = indices[tri].x;
+                let b = indices[tri+1].x;
+                let c = indices[tri+2].x;
                 let intersection = intersection(
                     origin, direction,
                     positions[a], positions[b], positions[c],

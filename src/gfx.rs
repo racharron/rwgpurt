@@ -1,35 +1,54 @@
 use crate::camera::Camera;
-use bytemuck::{bytes_of, cast_slice, Pod, try_cast_slice, Zeroable};
+use bytemuck::{bytes_of, cast_slice, try_cast_slice, Pod, Zeroable};
 use glam::{Vec3, Vec4};
+use std::arch::x86_64::__m128;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
+use std::io::Write;
 use std::mem::size_of;
-use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 use std::time::Duration;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
-use wgpu::{Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer, BufferAsyncError, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CommandEncoder, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device, Extent3d, Features, FragmentState, FrontFace, Instance, InstanceDescriptor, InstanceFlags, Limits, LoadOp, Maintain, MapMode, MultisampleState, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PresentMode, PrimitiveState, PrimitiveTopology, PushConstantRange, QuerySet, QuerySetDescriptor, QueryType, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages, StorageTextureAccess, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor, TextureViewDimension, VertexState};
+use wgpu::{
+    Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer,
+    BufferAsyncError, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState,
+    ColorWrites, CommandEncoder, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline,
+    ComputePipelineDescriptor, Device, Extent3d, Features, FragmentState, FrontFace, Instance,
+    InstanceDescriptor, InstanceFlags, Limits, LoadOp, Maintain, MapMode, MultisampleState,
+    Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PresentMode,
+    PrimitiveState, PrimitiveTopology, PushConstantRange, QuerySet, QuerySetDescriptor, QueryType,
+    Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    StorageTextureAccess, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
+    TextureViewDimension, VertexState,
+};
 use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
-const SAMPLES: usize = 32;
+const SAMPLE_COUNT: usize = 32;
+const MAX_VERTEX_COUNT: usize = 32;
+const MAX_INDEX_COUNT: usize = 32;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct MaterialParameters {
-    metallicity: f32,
-    roughness: f32,
+struct MeshletData {
+    triangles: u32,
+    vertices: u32,
+    _padding: u64,
 }
 
 struct WorldBuffers {
+    meshlet_data: Buffer,
     indices: Buffer,
     position: Buffer,
     diffuse: Buffer,
     specular: Buffer,
     emissivity: Buffer,
-    material_parameters: Buffer,
 }
 
 struct TimestampResources {
@@ -107,45 +126,14 @@ const VERTEX_SPECULAR: [Vec4; 7] = [
     Vec4::new(1.5, 1., 2.5, 0.25),
 ];
 
-const VERTEX_EMISSIVITY: [Vec3; 7] = [
-    Vec3::splat(0.5),
-    Vec3::ZERO,
-    Vec3::ZERO,
-    Vec3::ONE,
-    Vec3::ZERO,
-    Vec3::ZERO,
-    Vec3::splat(0.5),
-];
-
-const VERTEX_MATERIAL_PARAMETERS: [MaterialParameters; 7] = [
-    MaterialParameters {
-        metallicity: 0.,
-        roughness: 0.,
-    },
-    MaterialParameters {
-        metallicity: 1.,
-        roughness: 0.,
-    },
-    MaterialParameters {
-        metallicity: 0.,
-        roughness: 1.,
-    },
-    MaterialParameters {
-        metallicity: 0.5,
-        roughness: 0.5,
-    },
-    MaterialParameters {
-        metallicity: 1.,
-        roughness: 0.,
-    },
-    MaterialParameters {
-        metallicity: 0.,
-        roughness: 1.,
-    },
-    MaterialParameters {
-        metallicity: 1.,
-        roughness: 1.,
-    },
+const VERTEX_EMISSIVITY_ROUGHNESS: [Vec4; 7] = [
+    Vec4::splat(0.5),
+    Vec4::ZERO,
+    Vec4::ZERO,
+    Vec4::ONE,
+    Vec4::ZERO,
+    Vec4::ZERO,
+    Vec4::splat(0.5),
 ];
 
 impl Graphics {
@@ -342,7 +330,6 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
                 &wgpu::DeviceDescriptor {
                     label: None,
                     required_features: Features::PUSH_CONSTANTS
-                        | Features::BGRA8UNORM_STORAGE
                         | Features::TIMESTAMP_QUERY
                         | Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
                     required_limits: Limits {
@@ -370,7 +357,9 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             source: ShaderSource::Wgsl(Cow::Borrowed(
                 &std::fs::read_to_string("assets/shaders/raytracer.wgsl")
                     .unwrap()
-                    .replace("SAMPLE_COUNT", &SAMPLES.to_string()),
+                    .replace("SAMPLE_COUNT", &SAMPLE_COUNT.to_string())
+                    .replace("MAX_VERTEX_COUNT", &MAX_VERTEX_COUNT.to_string())
+                    .replace("MAX_INDEX_COUNT", &MAX_INDEX_COUNT.to_string()),
             )),
         });
         let render_shader = device.create_shader_module(ShaderModuleDescriptor {
@@ -389,7 +378,7 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             binding: 0,
             visibility: ShaderStages::COMPUTE,
             ty: BindingType::Buffer {
-                ty: BufferBindingType::Storage { read_only: true },
+                ty: BufferBindingType::Uniform,
                 has_dynamic_offset: false,
                 min_binding_size: None,
             },
@@ -403,6 +392,10 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             entries: &[
                 BindGroupLayoutEntry {
                     binding: 0,
+                    ..read_buffer_entry
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
                     ..read_buffer_entry
                 },
                 BindGroupLayoutEntry {
@@ -421,10 +414,6 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
                     binding: 14,
                     ..read_buffer_entry
                 },
-                BindGroupLayoutEntry {
-                    binding: 15,
-                    ..read_buffer_entry
-                },
             ],
         });
         let world_bind_group = device.create_bind_group(&BindGroupDescriptor {
@@ -433,6 +422,10 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             entries: &[
                 BindGroupEntry {
                     binding: 0,
+                    resource: world_buffers.meshlet_data.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
                     resource: world_buffers.indices.as_entire_binding(),
                 },
                 BindGroupEntry {
@@ -450,10 +443,6 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
                 BindGroupEntry {
                     binding: 14,
                     resource: world_buffers.emissivity.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 15,
-                    resource: world_buffers.material_parameters.as_entire_binding(),
                 },
             ],
         });
@@ -595,43 +584,59 @@ fn new_interface_texture(device: &Device, size: PhysicalSize<u32>) -> Texture {
 
 impl WorldBuffers {
     pub fn new(device: &Device) -> Self {
+        let meshlet_data = device.create_buffer_init(&BufferInitDescriptor {
+            label: None,
+            contents: bytes_of(&MeshletData {
+                triangles: (INDICES.len() - 2) as _,
+                vertices: VERTEX_POSITIONS.len() as _,
+                _padding: 0,
+            }),
+            usage: BufferUsages::UNIFORM,
+        });
+        let mut buffer = vec![0u8; 16 * MAX_INDEX_COUNT];;
+        buffer[..16 * INDICES.len()]
+            .copy_from_slice(bytes_of(
+                &INDICES.map(|i| [i, i, i, i]),
+            ));
         let indices = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
-            contents: cast_slice(&INDICES),
-            usage: BufferUsages::STORAGE,
+            contents: &buffer,
+            usage: BufferUsages::UNIFORM,
         });
+        buffer.resize(16 * MAX_VERTEX_COUNT, 0);
+        buffer[..16 * VERTEX_POSITIONS.len()]
+            .copy_from_slice(bytes_of(&VERTEX_POSITIONS.map(|p| p.extend(f32::NAN))));
         let position = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
-            contents: cast_slice(&VERTEX_POSITIONS.map(|p| p.extend(f32::NAN))),
-            usage: BufferUsages::STORAGE,
+            contents: &buffer,
+            usage: BufferUsages::UNIFORM,
         });
+        buffer[..16 * VERTEX_DIFFUSE.len()].copy_from_slice(bytes_of(&VERTEX_DIFFUSE));
         let diffuse = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
-            contents: cast_slice(&VERTEX_DIFFUSE),
-            usage: BufferUsages::STORAGE,
+            contents: &buffer,
+            usage: BufferUsages::UNIFORM,
         });
+        buffer[..16 * VERTEX_SPECULAR.len()].copy_from_slice(bytes_of(&VERTEX_SPECULAR));
         let specular = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
-            contents: cast_slice(&VERTEX_SPECULAR),
-            usage: BufferUsages::STORAGE,
+            contents: &buffer,
+            usage: BufferUsages::UNIFORM,
         });
+        buffer[..16 * VERTEX_EMISSIVITY_ROUGHNESS.len()]
+            .copy_from_slice(bytes_of(&VERTEX_EMISSIVITY_ROUGHNESS));
         let emissivity = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
-            contents: cast_slice(&VERTEX_EMISSIVITY.map(|e| e.extend(f32::NAN))),
-            usage: BufferUsages::STORAGE,
-        });
-        let material_parameters = device.create_buffer_init(&BufferInitDescriptor {
-            label: None,
-            contents: cast_slice(&VERTEX_MATERIAL_PARAMETERS),
-            usage: BufferUsages::STORAGE,
+            contents: &buffer,
+            usage: BufferUsages::UNIFORM,
         });
         WorldBuffers {
+            meshlet_data,
             indices,
             position,
             diffuse,
             specular,
             emissivity,
-            material_parameters,
         }
     }
 }
@@ -677,7 +682,7 @@ impl TimestampResources {
             0,
             &self.transfer_buffer,
             0,
-            size_of::<[u64; 2]>() as _
+            size_of::<[u64; 2]>() as _,
         );
     }
 }
