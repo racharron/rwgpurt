@@ -3,8 +3,6 @@ use crate::gfx::*;
 use crate::input::KeyboardState;
 use crate::metrics::Metrics;
 use glam::{Quat, Vec2, Vec3};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
