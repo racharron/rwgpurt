@@ -143,11 +143,10 @@ impl Graphics {
         self.renderer
             .surface
             .configure(&self.device, &self.renderer.config);
-        let interface = new_interface_texture(&self.device, size);
-        let view = interface.create_view(&TextureViewDescriptor::default());
+        let interface = new_interface(&self.device, size);
         let entries = &[BindGroupEntry {
             binding: 0,
-            resource: BindingResource::TextureView(&view),
+            resource: interface.as_entire_binding(),
         }];
         self.renderer.input_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
             label: None,
@@ -197,7 +196,6 @@ impl Graphics {
                     width,
                     height,
                     current_frame,
-                    rand,
                 )),
             );
             cpass.set_bind_group(0, &self.raytracer.world_bind_group, &[]);
@@ -231,6 +229,7 @@ impl Graphics {
                 occlusion_query_set: None,
             });
             render_pass.set_pipeline(&self.renderer.pipeline);
+            render_pass.set_push_constants(ShaderStages::FRAGMENT, 0, bytes_of(&width));
             render_pass.set_bind_group(0, &self.renderer.input_bind_group, &[]);
             render_pass.draw(0..3, 0..1);
         } /*
@@ -263,7 +262,9 @@ impl Graphics {
         let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[bind_group_layout],
-            push_constant_ranges: &[],
+            push_constant_ranges: &[
+                PushConstantRange { stages: ShaderStages::FRAGMENT, range: 0..4 },
+            ],
         });
         device.create_render_pipeline(&RenderPipelineDescriptor {
             label: None,
@@ -350,7 +351,7 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
 
         surface.configure(&device, &config);
 
-        let interface = new_interface_texture(&device, size);
+        let interface = new_interface(&device, size);
 
         let raytrace_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: None,
@@ -450,25 +451,27 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
         let output_bind_group_layout =
             device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: None,
-                entries: &[BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::StorageTexture {
-                        access: StorageTextureAccess::WriteOnly,
-                        format: interface.format(),
-                        view_dimension: TextureViewDimension::D2,
-                    },
-                    count: None,
-                }],
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::COMPUTE,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage {
+                                read_only: false,
+                            },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }
+                ],
             });
         let output_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: None,
             layout: &output_bind_group_layout,
             entries: &[BindGroupEntry {
                 binding: 0,
-                resource: BindingResource::TextureView(
-                    &interface.create_view(&TextureViewDescriptor::default()),
-                ),
+                resource: interface.as_entire_binding(),
             }],
         });
 
@@ -486,10 +489,10 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             entries: &[BindGroupLayoutEntry {
                 binding: 0,
                 visibility: ShaderStages::FRAGMENT,
-                ty: BindingType::Texture {
-                    sample_type: TextureSampleType::Float { filterable: false },
-                    view_dimension: TextureViewDimension::D2,
-                    multisampled: false,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
                 count: None,
             }],
@@ -497,12 +500,12 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
         let input_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: None,
             layout: &input_bind_group_layout,
-            entries: &[BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::TextureView(
-                    &interface.create_view(&TextureViewDescriptor::default()),
-                ),
-            }],
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: interface.as_entire_binding(),
+                }
+            ],
         });
 
         let render_pipeline = Graphics::new_render_pipeline(
@@ -565,20 +568,12 @@ fn new_raytracer_pipeline(
     })
 }
 
-fn new_interface_texture(device: &Device, size: PhysicalSize<u32>) -> Texture {
-    device.create_texture(&TextureDescriptor {
+fn new_interface(device: &Device, size: PhysicalSize<u32>) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
         label: None,
-        size: Extent3d {
-            width: size.width,
-            height: size.height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: TextureDimension::D2,
-        format: TextureFormat::Rgba32Float,
-        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING,
-        view_formats: &[TextureFormat::Rgba32Float],
+        size: (size_of::<Vec4>() as u32 * size.width * size.height) as _,
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
     })
 }
 
@@ -695,9 +690,9 @@ pub struct PushConstants {
     base: Vec3,
     frame: u32,
     horizontal: Vec3,
-    rand: u32,
+    width: u32,
     vertical: Vec3,
-    _padding3: u32,
+    height: u32,
 }
 
 impl PushConstants {
@@ -706,7 +701,6 @@ impl PushConstants {
         screen_width: u32,
         screen_height: u32,
         frame: u32,
-        rand: u32,
     ) -> Self {
         let hw = (0.5 * camera.view_angles.x).tan();
         let hh = (0.5 * camera.view_angles.y).tan();
@@ -721,9 +715,9 @@ impl PushConstants {
             base: camera.position + camera.orientation * base,
             frame,
             horizontal: camera.orientation * (2.0 * Vec3::X * hw / screen_width as f32),
-            rand,
+            width: screen_width,
             vertical: camera.orientation * (2.0 * Vec3::NEG_Y * hh / screen_height as f32),
-            _padding3: 0,
+            height: screen_height,
         }
     }
 }

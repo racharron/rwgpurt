@@ -8,8 +8,8 @@ const A_2: f32 = 1. / (PHI_2*PHI_2);
 struct PushConstants {
     origin_max: vec4<f32>,
     base_uframe: vec4<f32>,
-    horizontal_rand: vec4<f32>,
-    vertical: vec4<f32>,
+    horizontal_width: vec4<f32>,
+    vertical_height: vec4<f32>,
 }
 
 struct MeshletData {
@@ -45,22 +45,23 @@ var<uniform> specular_metallicity: array<vec4<f32>, MAX_VERTEX_COUNT>;
 var<uniform> emmisivity_roughness: array<vec4<f32>, MAX_VERTEX_COUNT>;
 
 @group(1) @binding(0)
-var output: texture_storage_2d<rgba32float, write>;
+var<storage, read_write> output: array<vec4<f32>>;
 
 const rt_wgs_x: u32 = 8;
 const rt_wgs_y: u32 = 8;
 
 @compute @workgroup_size(rt_wgs_x, rt_wgs_y)
 fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
-    let dimensions = textureDimensions(output);
-    if all(id.xy < dimensions) {
+    let width = bitcast<u32>(push_constants.horizontal_width.w);
+    let height = bitcast<u32>(push_constants.vertical_height.w);
+    if all(id.xy < vec2(width, height)) {
         let render_distance = push_constants.origin_max.w;
         let origin = push_constants.origin_max.xyz;
         let base = push_constants.base_uframe.xyz;
-        let frame_count = bitcast<u32>(push_constants.base_uframe);
-        let x = push_constants.horizontal_rand.xyz;
-        let y = push_constants.vertical.xyz;
-        let rand = pcg3d(vec3(id.xy, bitcast<u32>(push_constants.horizontal_rand.z)));
+        let frame_count = bitcast<u32>(push_constants.base_uframe.w);
+        let x = push_constants.horizontal_width.xyz;
+        let y = push_constants.vertical_height.xyz;
+        let rand = pcg3d(vec3(id.xy, frame_count));
         var pixel = vec3<f32>();
         var pixel_error = vec3<f32>();
         for (var s = 0u; s < SAMPLE_COUNT; s += 1u) {
@@ -91,7 +92,8 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
             pixel_error = (t - pixel) - y;
             pixel = t;
         }
-        textureStore(output, id.xy, vec4(pixel / f32(SAMPLE_COUNT), 1.));
+//        textureStore(output, id.xy, vec4(pixel / f32(SAMPLE_COUNT), 1.));
+        output[id.y * width + id.x] = vec4(pixel / f32(SAMPLE_COUNT), 1.);
     }
 }
 

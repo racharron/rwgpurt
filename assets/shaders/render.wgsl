@@ -1,5 +1,7 @@
+var<push_constant> width: u32;
+
 @group(0) @binding(0)
-var frame: texture_2d<f32>;
+var<storage, read_write> frame: array<vec4<f32>>;
 
 @vertex
 fn vertex(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -13,5 +15,6 @@ fn vertex(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fragment(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
-    return textureLoad(frame, vec2<u32>(p.xy), 0);
+    let pixel = vec2<u32>(p.xy);
+    return frame[pixel.y * width + pixel.x];
 }
