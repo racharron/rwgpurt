@@ -1,30 +1,23 @@
 use crate::camera::Camera;
-use bytemuck::{bytes_of, cast_slice, try_cast_slice, Pod, Zeroable};
+use bytemuck::{bytes_of, try_cast_slice, Pod, Zeroable};
 use glam::{Vec3, Vec4};
-use std::arch::x86_64::__m128;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
-use std::io::Write;
 use std::mem::size_of;
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Duration;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer,
-    BufferAsyncError, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState,
     ColorWrites, CommandEncoder, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline,
-    ComputePipelineDescriptor, Device, Extent3d, Features, FragmentState, FrontFace, Instance,
+    ComputePipelineDescriptor, Device, Features, FragmentState, FrontFace, Instance,
     InstanceDescriptor, InstanceFlags, Limits, LoadOp, Maintain, MapMode, MultisampleState,
     Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PresentMode,
     PrimitiveState, PrimitiveTopology, PushConstantRange, QuerySet, QuerySetDescriptor, QueryType,
     Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
-    RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages,
-    StorageTextureAccess, StoreOp, Surface, SurfaceConfiguration, Texture, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
-    TextureViewDimension, VertexState,
+    RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Surface, SurfaceConfiguration, TextureFormat, TextureViewDescriptor, VertexState,
 };
 use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
@@ -173,7 +166,7 @@ impl Graphics {
         );
     }
 
-    pub fn draw(&mut self, camera: &Camera, current_frame: u32, rand: u32) -> Duration {
+    pub fn draw(&mut self, camera: &Camera, current_frame: u32) -> Duration {
         let frame = self.renderer.surface.get_current_texture().unwrap();
         assert!(!frame.suboptimal);
         let texture = &frame.texture;
