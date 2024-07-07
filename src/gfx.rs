@@ -191,12 +191,7 @@ impl Graphics {
             cpass.set_pipeline(&self.raytracer.pipeline);
             cpass.set_push_constants(
                 0,
-                bytes_of(&PushConstants::new(
-                    camera,
-                    width,
-                    height,
-                    current_frame,
-                )),
+                bytes_of(&PushConstants::new(camera, width, height, current_frame)),
             );
             cpass.set_bind_group(0, &self.raytracer.world_bind_group, &[]);
             cpass.set_bind_group(1, &self.raytracer.output_bind_group, &[]);
@@ -262,9 +257,10 @@ impl Graphics {
         let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[bind_group_layout],
-            push_constant_ranges: &[
-                PushConstantRange { stages: ShaderStages::FRAGMENT, range: 0..4 },
-            ],
+            push_constant_ranges: &[PushConstantRange {
+                stages: ShaderStages::FRAGMENT,
+                range: 0..4,
+            }],
         });
         device.create_render_pipeline(&RenderPipelineDescriptor {
             label: None,
@@ -451,20 +447,16 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
         let output_bind_group_layout =
             device.create_bind_group_layout(&BindGroupLayoutDescriptor {
                 label: None,
-                entries: &[
-                    BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStages::COMPUTE,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Storage {
-                                read_only: false,
-                            },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    }
-                ],
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
             });
         let output_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: None,
@@ -500,12 +492,10 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
         let input_bind_group = device.create_bind_group(&BindGroupDescriptor {
             label: None,
             layout: &input_bind_group_layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: interface.as_entire_binding(),
-                }
-            ],
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: interface.as_entire_binding(),
+            }],
         });
 
         let render_pipeline = Graphics::new_render_pipeline(
@@ -588,11 +578,8 @@ impl WorldBuffers {
             }),
             usage: BufferUsages::UNIFORM,
         });
-        let mut buffer = vec![0u8; 16 * MAX_INDEX_COUNT];;
-        buffer[..16 * INDICES.len()]
-            .copy_from_slice(bytes_of(
-                &INDICES.map(|i| [i, i, i, i]),
-            ));
+        let mut buffer = vec![0u8; 16 * MAX_INDEX_COUNT];
+        buffer[..16 * INDICES.len()].copy_from_slice(bytes_of(&INDICES.map(|i| [i, i, i, i])));
         let indices = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
             contents: &buffer,
@@ -696,12 +683,7 @@ pub struct PushConstants {
 }
 
 impl PushConstants {
-    pub fn new(
-        camera: &Camera,
-        screen_width: u32,
-        screen_height: u32,
-        frame: u32,
-    ) -> Self {
+    pub fn new(camera: &Camera, screen_width: u32, screen_height: u32, frame: u32) -> Self {
         let hw = (0.5 * camera.view_angles.x).tan();
         let hh = (0.5 * camera.view_angles.y).tan();
         let base = Vec3::new(
