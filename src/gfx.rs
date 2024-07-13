@@ -10,22 +10,24 @@ use std::time::Duration;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState,
-    ColorWrites, CommandEncoder, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline,
-    ComputePipelineDescriptor, Device, Features, FragmentState, FrontFace, Instance,
-    InstanceDescriptor, InstanceFlags, Limits, LoadOp, Maintain, MapMode, MultisampleState,
-    Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PolygonMode, PresentMode,
-    PrimitiveState, PrimitiveTopology, PushConstantRange, QuerySet, QuerySetDescriptor, QueryType,
-    Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
-    RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Surface, SurfaceConfiguration, TextureFormat, TextureViewDescriptor, VertexState,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType,
+    BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CommandEncoder,
+    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
+    Device, Features, FragmentState, FrontFace, Instance, InstanceDescriptor, InstanceFlags,
+    Limits, LoadOp, Maintain, MapMode, MultisampleState, Operations, PipelineCompilationOptions,
+    PipelineLayoutDescriptor, PolygonMode, PresentMode, PrimitiveState, PrimitiveTopology,
+    PushConstantRange, QuerySet, QuerySetDescriptor, QueryType, Queue, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, ShaderModule,
+    ShaderModuleDescriptor, ShaderSource, ShaderStages, StoreOp, Surface, SurfaceConfiguration,
+    TextureFormat, TextureViewDescriptor, VertexState,
 };
 use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
-const SAMPLE_COUNT: usize = 32;
-const MAX_VERTEX_COUNT: usize = 32;
-const MAX_INDEX_COUNT: usize = 32;
+const SAMPLE_COUNT: usize = 64;
+const MAX_VERTEX_COUNT: usize = 8;
+const MAX_INDEX_COUNT: usize = 8;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -100,26 +102,26 @@ const VERTEX_POSITIONS: [Vec3; 7] = [
 ];
 
 const VERTEX_DIFFUSE: [Vec4; 7] = [
-    Vec4::new(-1.5, 1., -0.5, 0.25),
-    Vec4::new(-1., -1., 0., 0.5),
-    Vec4::new(-0.5, 1., 0.5, 0.75),
-    Vec4::new(0., -1., 1., 1.),
-    Vec4::new(0.5, 1., 1.5, 1.),
-    Vec4::new(1., -1., 2., 1.),
-    Vec4::new(1.5, 1., 2.5, 1.),
+    Vec4::new(0.5, 0.5, 1., 0.25),
+    Vec4::new(0.5, 1., 0.5, 0.5),
+    Vec4::new(0.5, 1., 1., 0.75),
+    Vec4::new(1., 0.5, 0.5, 1.),
+    Vec4::new(1., 0.5, 1., 1.),
+    Vec4::new(1., 1., 0.5, 1.),
+    Vec4::new(1., 1., 1., 1.),
 ];
 
 const VERTEX_SPECULAR: [Vec4; 7] = [
-    Vec4::new(-1.5, 1., -0.5, 1.),
-    Vec4::new(-1., -1., 0., 1.),
-    Vec4::new(-0.5, 1., 0.5, 1.),
-    Vec4::new(0., -1., 1., 1.),
-    Vec4::new(0.5, 1., 1.5, 0.75),
-    Vec4::new(1., -1., 2., 0.5),
-    Vec4::new(1.5, 1., 2.5, 0.25),
+    Vec4::new(0.5, 1., 0.5, 1.),
+    Vec4::new(1., 1., 0., 1.),
+    Vec4::new(0.5, 1., 0.5, 1.),
+    Vec4::new(0., 1., 1., 1.),
+    Vec4::new(0.5, 1., 0.5, 0.75),
+    Vec4::new(1., 1., 0., 0.5),
+    Vec4::new(0.5, 1., 0.5, 0.25),
 ];
 
-const VERTEX_EMISSIVITY_ROUGHNESS: [Vec4; 7] = [
+const VERTEX_EMISSIVITY_ROUGHNESS: [Vec4; 7] = [Vec4::ZERO; 7]/*[
     Vec4::splat(0.5),
     Vec4::ZERO,
     Vec4::ZERO,
@@ -127,7 +129,7 @@ const VERTEX_EMISSIVITY_ROUGHNESS: [Vec4; 7] = [
     Vec4::ZERO,
     Vec4::ZERO,
     Vec4::splat(0.5),
-];
+]*/;
 
 impl Graphics {
     pub fn resize(&mut self, size: PhysicalSize<u32>) {

@@ -1,4 +1,5 @@
 const EPSILON: f32 = pow(2., -23.);
+const TAU: f32 = 6.283185307179586;
 //  Plastic number, or the second most irrational number
 //  See "The Unreasonable Effectiveness of Quasirandom Sequences"
 const PHI_2: f32 = 1.32471795724474602596;
@@ -36,13 +37,13 @@ var<uniform> positions: array<vec3<f32>, MAX_VERTEX_COUNT>;
 //  Normals go here.
 
 @group(0) @binding(12)
-var<uniform> diffuse: array<vec4<f32>, MAX_VERTEX_COUNT>;
+var<uniform> diffusive_transparency: array<vec4<f32>, MAX_VERTEX_COUNT>;
 
 @group(0) @binding(13)
 var<uniform> specular_metallicity: array<vec4<f32>, MAX_VERTEX_COUNT>;
 
 @group(0) @binding(14)
-var<uniform> emmisivity_roughness: array<vec4<f32>, MAX_VERTEX_COUNT>;
+var<uniform> emissivity_roughness: array<vec4<f32>, MAX_VERTEX_COUNT>;
 
 @group(1) @binding(0)
 var<storage, read_write> output: array<vec4<f32>>;
@@ -56,49 +57,96 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
     let height = bitcast<u32>(push_constants.vertical_height.w);
     if all(id.xy < vec2(width, height)) {
         let render_distance = push_constants.origin_max.w;
-        let origin = push_constants.origin_max.xyz;
         let base = push_constants.base_uframe.xyz;
         let frame_count = bitcast<u32>(push_constants.base_uframe.w);
         let x = push_constants.horizontal_width.xyz;
         let y = push_constants.vertical_height.xyz;
-        let rand = pcg3d(vec3(id.xy, frame_count));
         var pixel = vec3<f32>();
         var pixel_error = vec3<f32>();
         for (var s = 0u; s < SAMPLE_COUNT; s += 1u) {
-            var depth = render_distance;
-            var jitter = quasirandom((rand.z & 0xFF) * SAMPLE_COUNT + s);
+            var origin = push_constants.origin_max.xyz;
+            var jitter = quasirandom((pcg3d(vec3(id.xy, frame_count)).z & 0xFF) * SAMPLE_COUNT + s) - 0.5;
             var direction = normalize(
                 base
                 + (f32(id.x) + jitter.x) * x
                 + (f32(id.y) + jitter.y) * y
                 - origin
             );
-            var color = miss(direction);
-            for (var tri = 0u; tri < meshlet_data.triangle_count; tri += 1u) {
-                let a = indices[tri].x;
-                let b = indices[tri+1].x;
-                let c = indices[tri+2].x;
-                let intersection = intersection(
-                    origin, direction,
-                    positions[a], positions[b], positions[c],
-                );
-                if intersection.intersects && intersection.position_distance.w < depth {
-                    depth = intersection.position_distance.w;
-                    color = (diffuse[a].xyz + diffuse[b].xyz + diffuse[c].xyz) / 3.;
+            var sum = vec3(0.);
+            var prod = vec3(1.);
+            var skip = bitcast<u32>(-1);
+            for (var b = 0u; b < 4; b += 1u) {
+                var depth = render_distance;
+                var diffuse = vec3(0.);
+                var emissive = vec3(0.);
+                var normal = vec3(0.);
+                var contact = vec3(0.);
+                var flip = false;
+                var missed = true;
+                for (var tri = 0u; tri < meshlet_data.triangle_count; tri += 1u) {
+                    if tri == skip {
+                        continue;
+                    }
+                    let a = indices[tri].x;
+                    let b = indices[select(tri+1, tri+2, flip)].x;
+                    let c = indices[select(tri+2, tri+1, flip)].x;
+                    let p_a = positions[a];
+                    let p_b = positions[b];
+                    let p_c = positions[c];
+                    let ab = p_b - p_a;
+                    let bc = p_c - p_b;
+                    let scaled_normal = cross(ab, bc);
+                    let intersection = intersection(origin, direction, p_a, p_b, p_c);
+                    if intersection.intersects && intersection.position_distance.w < depth && dot(scaled_normal, direction) > 0. {
+                        missed = false;
+                        normal = normalize(scaled_normal);
+                        contact = intersection.position_distance.xyz;
+                        depth = intersection.position_distance.w;
+                        diffuse = (diffusive_transparency[a].xyz + diffusive_transparency[b].xyz + diffusive_transparency[c].xyz) / 3.;
+                        emissive = (emissivity_roughness[a].xyz + emissivity_roughness[b].xyz + emissivity_roughness[c].xyz);
+                        skip = tri;
+                    }
+                    flip = !flip;
+                }
+                if missed {
+                    break;
+                } else {
+                    sum += prod*emissive;
+                    prod *= diffuse;
+                    origin = contact;
+                    let urand = pcg4d(vec4(id.xy, frame_count, b));
+                    let nrand = vec4(box_muller(urand.z), box_muller(urand.w));
+                    let dir = normalize(nrand.xyz);
+                    direction = select(dir, -nrand.xyz, dot(dir, normal) > 0.);
                 }
             }
-            let y = color - pixel_error;
+            let y = (sum + prod * miss(direction, frame_count)) - pixel_error;
             let t = pixel + y;
             pixel_error = (t - pixel) - y;
             pixel = t;
         }
-//        textureStore(output, id.xy, vec4(pixel / f32(SAMPLE_COUNT), 1.));
-        output[id.y * width + id.x] = vec4(pixel / f32(SAMPLE_COUNT), 1.);
+        output[id.y * width + id.x] = vec4(pixel / f32(SAMPLE_COUNT), 1.);/*
+        let nrand = vec4(box_muller(urand.z), box_muller(urand.w));
+        let dir = normalize(nrand.xyz);
+        output[id.y * width + id.x] = vec4(0.5 + 0.5 * dir, 1.);
+        let frame = bitcast<u32>(push_constants.base_uframe.w);
+        let urand = pcg4d(vec4(id.xy, frame / 64, 1u));
+        let norm = normalize(vec3(box_muller(urand.z), box_muller(urand.w).x));
+        if any(norm >= vec3(0.)) {
+            output[id.y * width + id.x] = vec4(select(vec3(1.), vec3(0., 1., 0.), frame % 16 < 8), 1.);
+        } else if any(norm <= vec3(0.)) {
+            output[id.y * width + id.x] = vec4(select(vec3(0., 0., 1.), vec3(1.), frame % 16 < 8), 1.);
+        } else if any(norm == vec3(0.)) {
+            output[id.y * width + id.x] = vec4(select(vec3(1., 0.5, 0.), vec3(1., 0., 0.5), frame % 16 < 8), 1.);
+        } else {
+            output[id.y * width + id.x] = vec4(abs(norm), 1.);
+        }*/
     }
 }
 
-fn miss(direction: vec3<f32>) -> vec3<f32> {
-    return vec3(1.);
+fn miss(direction: vec3<f32>, frame_count: u32) -> vec3<f32> {
+    let angle = TAU * f32(frame_count % 128) / 128.;
+    return vec3(pow(1. + dot(direction.xz, vec2(cos(angle), sin(angle))), 2.));
 }
 
 struct MaybeIntersection {
@@ -140,6 +188,14 @@ fn intersection(origin: vec3<f32>, direction: vec3<f32>, a: vec3<f32>, b: vec3<f
     }
 }
 
+fn box_muller(seed: u32) -> vec2<f32> {
+    let u1 = f32((seed & 0xFFFFu) + 1u) / f32(0x10001);
+    let u2 = f32((seed >> 16u) + 1u) / f32(0x10001);
+    let z0 = sqrt(-2. * log(u1)) * cos(TAU * u2);
+    let z1 = sqrt(-2. * log(u1)) * sin(TAU * u2);
+    return vec2(z0, z1);
+}
+
 //  Generates a random number in the range (-0.5, 0.5). (Half Centered around Zero).
 fn gen_f32_hcz(rand: u32) -> f32 {
     let exponent = 126u << 23;
@@ -174,5 +230,5 @@ fn pcg4d(input: vec4<u32>) -> vec4<u32> {
 }
 
 fn quasirandom(n: u32) -> vec2<f32> {
-    return (vec2(A_1 * f32(n), A_2 * f32(n)) + 0.5) % 1;
+    return (vec2(A_1 * f32(n), A_2 * f32(n)) + 0.5) % 1.;
 }
