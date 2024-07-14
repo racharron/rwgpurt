@@ -65,7 +65,9 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
         var pixel_error = vec3<f32>();
         for (var s = 0u; s < SAMPLE_COUNT; s += 1u) {
             var origin = push_constants.origin_max.xyz;
-            var jitter = quasirandom((pcg3d(vec3(id.xy, frame_count)).z & 0xFF) * SAMPLE_COUNT + s) - 0.5;
+//            var jitter = quasirandom((pcg3d(vec3(id.xy, frame_count)).z & 0xFF) * SAMPLE_COUNT + s) - 0.5;
+            let urand1 = pcg4d(vec4(id.xy, frame_count, s));
+            let jitter = vec2(f32((urand1.w & 0xFFFF) + 1), f32((urand1.w >> 16) + 1)) / f32(0x10001) - 0.5;
             var direction = normalize(
                 base
                 + (f32(id.x) + jitter.x) * x
@@ -95,9 +97,9 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
                     let p_c = positions[c];
                     let ab = p_b - p_a;
                     let bc = p_c - p_b;
-                    let scaled_normal = cross(ab, bc);
+                    let scaled_normal = cross(bc, ab);
                     let intersection = intersection(origin, direction, p_a, p_b, p_c);
-                    if intersection.intersects && intersection.position_distance.w < depth && dot(scaled_normal, direction) > 0. {
+                    if intersection.intersects && intersection.position_distance.w < depth && dot(scaled_normal, direction) < 0. {
                         missed = false;
                         normal = normalize(scaled_normal);
                         contact = intersection.position_distance.xyz;
@@ -114,10 +116,10 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
                     sum += prod*emissive;
                     prod *= diffuse;
                     origin = contact;
-                    let urand = pcg4d(vec4(id.xy, frame_count, b));
+                    let urand = pcg4d(vec4(id.xy, frame_count, 4 * s + b));
                     let nrand = vec4(box_muller(urand.z), box_muller(urand.w));
-                    let dir = normalize(nrand.xyz);
-                    direction = select(dir, -nrand.xyz, dot(dir, normal) > 0.);
+                    let rand_norm = normalize(nrand.xyz);
+                    direction = normal + select(rand_norm, -rand_norm, dot(rand_norm, normal) < 0.);
                 }
             }
             let y = (sum + prod * miss(direction, frame_count)) - pixel_error;
@@ -125,28 +127,13 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
             pixel_error = (t - pixel) - y;
             pixel = t;
         }
-        output[id.y * width + id.x] = vec4(pixel / f32(SAMPLE_COUNT), 1.);/*
-        let nrand = vec4(box_muller(urand.z), box_muller(urand.w));
-        let dir = normalize(nrand.xyz);
-        output[id.y * width + id.x] = vec4(0.5 + 0.5 * dir, 1.);
-        let frame = bitcast<u32>(push_constants.base_uframe.w);
-        let urand = pcg4d(vec4(id.xy, frame / 64, 1u));
-        let norm = normalize(vec3(box_muller(urand.z), box_muller(urand.w).x));
-        if any(norm >= vec3(0.)) {
-            output[id.y * width + id.x] = vec4(select(vec3(1.), vec3(0., 1., 0.), frame % 16 < 8), 1.);
-        } else if any(norm <= vec3(0.)) {
-            output[id.y * width + id.x] = vec4(select(vec3(0., 0., 1.), vec3(1.), frame % 16 < 8), 1.);
-        } else if any(norm == vec3(0.)) {
-            output[id.y * width + id.x] = vec4(select(vec3(1., 0.5, 0.), vec3(1., 0., 0.5), frame % 16 < 8), 1.);
-        } else {
-            output[id.y * width + id.x] = vec4(abs(norm), 1.);
-        }*/
+        output[id.y * width + id.x] = vec4(pixel / f32(SAMPLE_COUNT), 1.);
     }
 }
 
 fn miss(direction: vec3<f32>, frame_count: u32) -> vec3<f32> {
-    let angle = TAU * f32(frame_count % 128) / 128.;
-    return vec3(pow(1. + dot(direction.xz, vec2(cos(angle), sin(angle))), 2.));
+    let angle = TAU * f32(frame_count % 256) / 256.;
+    return vec3(0.5 + 0.5 * dot(direction.xz, vec2(cos(angle), sin(angle))));
 }
 
 struct MaybeIntersection {
