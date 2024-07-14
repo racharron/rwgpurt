@@ -65,7 +65,6 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
         var pixel_error = vec3<f32>();
         for (var s = 0u; s < SAMPLE_COUNT; s += 1u) {
             var origin = push_constants.origin_max.xyz;
-//            var jitter = quasirandom((pcg3d(vec3(id.xy, frame_count)).z & 0xFF) * SAMPLE_COUNT + s) - 0.5;
             let urand1 = pcg4d(vec4(id.xy, frame_count, s));
             let jitter = vec2(f32((urand1.w & 0xFFFF) + 1), f32((urand1.w >> 16) + 1)) / f32(0x10001) - 0.5;
             var direction = normalize(
@@ -80,7 +79,9 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
             for (var b = 0u; b < 4; b += 1u) {
                 var depth = render_distance;
                 var diffuse = vec3(0.);
+                var alpha = 0.;
                 var emissive = vec3(0.);
+                var roughness = 0.;
                 var normal = vec3(0.);
                 var contact = vec3(0.);
                 var flip = false;
@@ -104,8 +105,12 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
                         normal = normalize(scaled_normal);
                         contact = intersection.position_distance.xyz;
                         depth = intersection.position_distance.w;
-                        diffuse = (diffusive_transparency[a].xyz + diffusive_transparency[b].xyz + diffusive_transparency[c].xyz) / 3.;
-                        emissive = (emissivity_roughness[a].xyz + emissivity_roughness[b].xyz + emissivity_roughness[c].xyz);
+                        let da = (diffusive_transparency[a] + diffusive_transparency[b] + diffusive_transparency[c]) / 3.;
+                        let er = (emissivity_roughness[a] + emissivity_roughness[b] + emissivity_roughness[c]) / 3.;
+                        diffuse = da.xyz;
+                        alpha = da.w;
+                        emissive = er.xyz;
+                        roughness = er.w;
                         skip = tri;
                     }
                     flip = !flip;
@@ -117,9 +122,16 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
                     prod *= diffuse;
                     origin = contact;
                     let urand = pcg4d(vec4(id.xy, frame_count, 4 * s + b));
-                    let nrand = vec4(box_muller(urand.z), box_muller(urand.w));
-                    let rand_norm = normalize(nrand.xyz);
-                    direction = normal + select(rand_norm, -rand_norm, dot(rand_norm, normal) < 0.);
+                    let uniforms = gen_uniforms_0_1_in(urand.x);
+                    let alpha_rand = uniforms.x;
+                    let roughness_rand = uniforms.y;
+                    if alpha_rand > alpha {
+                        //  TODO: refraction & scattering
+                    } else {
+                        let nrand = vec4(box_muller(urand.z), box_muller(urand.w));
+                        let rand_norm = normalize(nrand.xyz);
+                        direction = normal + select(rand_norm, -rand_norm, dot(rand_norm, normal) < 0.);
+                    }
                 }
             }
             let y = (sum + prod * miss(direction, frame_count)) - pixel_error;
@@ -173,6 +185,12 @@ fn intersection(origin: vec3<f32>, direction: vec3<f32>, a: vec3<f32>, b: vec3<f
     } else { // This means that there is a line intersection but not a ray intersection.
         return MaybeIntersection(false, vec4<f32>());
     }
+}
+
+fn gen_uniforms_0_1_in(seed: u32) -> vec2<f32> {
+    let a = seed & 0xFFFFu;
+    let b = seed >> 16u;
+    return vec2(f32(a), f32(b)) / f32(0xFFFF);
 }
 
 fn box_muller(seed: u32) -> vec2<f32> {
