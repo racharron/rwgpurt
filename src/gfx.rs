@@ -25,7 +25,7 @@ use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
-const SAMPLE_COUNT: usize = 64;
+const SAMPLE_COUNT: usize = 32;
 const MAX_VERTEX_COUNT: usize = 8;
 const MAX_INDEX_COUNT: usize = 8;
 
@@ -121,15 +121,15 @@ const VERTEX_SPECULAR: [Vec4; 7] = [
     Vec4::new(0.5, 1., 0.5, 0.25),
 ];
 
-const VERTEX_EMISSIVITY_ROUGHNESS: [Vec4; 7] = [Vec4::ZERO; 7]/*[
-    Vec4::splat(0.5),
+const VERTEX_EMISSIVITY_ROUGHNESS: [Vec4; 7] = [
     Vec4::ZERO,
     Vec4::ZERO,
-    Vec4::ONE,
     Vec4::ZERO,
     Vec4::ZERO,
-    Vec4::splat(0.5),
-]*/;
+    Vec4::ZERO,
+    Vec4::ZERO,
+    Vec4::ZERO,
+];
 
 impl Graphics {
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
