@@ -26,10 +26,10 @@ impl Camera {
         if keyboard.is_held(KeyCode::KeyD) {
             delta += Vec3::X;
         }
-        if keyboard.is_held(KeyCode::KeyQ) {
+        if keyboard.is_held(KeyCode::Space) {
             delta += Vec3::Y;
         }
-        if keyboard.is_held(KeyCode::KeyE) {
+        if keyboard.is_held(KeyCode::KeyC) {
             delta += Vec3::NEG_Y;
         }
         delta = self.orientation * delta;
@@ -46,10 +46,10 @@ impl Camera {
         if keyboard.is_held(KeyCode::ArrowRight) {
             axis += Vec3::Y;
         }
-        if keyboard.is_held(KeyCode::Insert) {
+        if keyboard.is_held(KeyCode::KeyE) {
             axis += Vec3::NEG_Z;
         }
-        if keyboard.is_held(KeyCode::PageUp) {
+        if keyboard.is_held(KeyCode::KeyQ) {
             axis += Vec3::Z;
         }
         if keyboard.is_held(KeyCode::ShiftLeft) {
