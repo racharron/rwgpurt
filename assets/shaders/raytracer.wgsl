@@ -82,6 +82,8 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
                 var alpha = 0.;
                 var emissive = vec3(0.);
                 var roughness = 0.;
+                var specular = vec3(0.);
+                var metallicity = 0.;
                 var normal = vec3(0.);
                 var contact = vec3(0.);
                 var flip = false;
@@ -107,10 +109,13 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
                         depth = intersection.position_distance.w;
                         let da = (diffusive_transparency[a] + diffusive_transparency[b] + diffusive_transparency[c]) / 3.;
                         let er = (emissivity_roughness[a] + emissivity_roughness[b] + emissivity_roughness[c]) / 3.;
+                        let sm = (specular_metallicity[a] + specular_metallicity[b] + specular_metallicity[c]) / 3.;
                         diffuse = da.xyz;
                         alpha = da.w;
                         emissive = er.xyz;
                         roughness = er.w;
+                        specular = sm.xyz;
+                        metallicity = sm.w;
                         skip = tri;
                     }
                     flip = !flip;
@@ -118,20 +123,27 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
                 if missed {
                     break;
                 } else {
-                    sum += prod*emissive;
-                    prod *= diffuse;
                     origin = contact;
                     let urand = pcg4d(vec4(id.xy, frame_count, 4 * s + b));
                     let uniforms = gen_uniforms_0_1_in(urand.x);
                     let alpha_rand = uniforms.x;
-                    let roughness_rand = uniforms.y;
-                    if alpha_rand > alpha {
-                        //  TODO: refraction & scattering
+                    let metallicity_rand = uniforms.y;
+                    let nrand = vec4(box_muller(urand.z), box_muller(urand.w));
+                    let rand_norm = normalize(nrand.xyz);
+                    if metallicity_rand <= metallicity {
+                        prod *= specular;
+                        direction = normalize(direction - 2 * dot(direction, normal) * normal) + rand_norm * roughness;
+                        if dot(direction, normal) > 0. {
+                            continue;
+                        }
                     } else {
-                        let nrand = vec4(box_muller(urand.z), box_muller(urand.w));
-                        let rand_norm = normalize(nrand.xyz);
-                        direction = normal + select(rand_norm, -rand_norm, dot(rand_norm, normal) < 0.);
+                        sum += prod*emissive;
+                        prod *= diffuse;
                     }
+                    if alpha_rand > alpha {
+                        continue;
+                    }
+                    direction = normal + rand_norm;
                 }
             }
             let y = (sum + prod * miss(direction, frame_count)) - pixel_error;
