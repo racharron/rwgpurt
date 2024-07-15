@@ -65,8 +65,8 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
         var pixel_error = vec3<f32>();
         for (var s = 0u; s < SAMPLE_COUNT; s += 1u) {
             var origin = push_constants.origin_max.xyz;
-            let urand1 = pcg4d(vec4(id.xy, frame_count, s));
-            let jitter = vec2(f32((urand1.w & 0xFFFF) + 1), f32((urand1.w >> 16) + 1)) / f32(0x10001) - 0.5;
+            var urand = pcg4d(vec4(id.xy, frame_count, s));
+            let jitter = vec2(f32((urand.w & 0xFFFF) + 1), f32((urand.w >> 16) + 1)) / f32(0x10001) - 0.5;
             var direction = normalize(
                 base
                 + (f32(id.x) + jitter.x) * x
@@ -124,7 +124,7 @@ fn raytrace(@builtin(global_invocation_id) id: vec3<u32>) {
                     break;
                 } else {
                     origin = contact;
-                    let urand = pcg4d(vec4(id.xy, frame_count, 4 * s + b));
+                    urand = pcg4d(urand);
                     let uniforms = gen_uniforms_0_1_in(urand.x);
                     let alpha_rand = uniforms.x;
                     let metallicity_rand = uniforms.y;
