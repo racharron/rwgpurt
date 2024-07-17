@@ -8,10 +8,12 @@ use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
+use crate::args::Settings;
 
 pub enum App {
-    Empty,
+    New(Settings),
     Running {
+        settings: Settings,
         graphics: Graphics,
         keyboard: KeyboardState,
         camera: Camera,
@@ -22,10 +24,12 @@ pub enum App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let App::Empty = self else { return };
+        let App::New(settings) = self else { return };
+        let settings = settings.clone();
         let last_move = Instant::now();
-        let graphics = pollster::block_on(create_graphics(event_loop));
+        let graphics = pollster::block_on(create_graphics(event_loop, settings));
         *self = App::Running {
+            settings,
             graphics,
             keyboard: KeyboardState::new(),
             camera: Camera {
@@ -49,12 +53,13 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match (self, event) {
             (_, WindowEvent::CloseRequested) => event_loop.exit(),
-            (App::Empty, _) => {}
+            (App::New(_), _) => {}
             (App::Running { graphics, .. }, WindowEvent::Resized(size)) => {
                 graphics.resize(size);
             }
             (
                 App::Running {
+                    settings,
                     graphics,
                     camera,
                     keyboard,
@@ -67,7 +72,7 @@ impl ApplicationHandler for App {
                 let last_frame_time = now - *last_move;
                 *last_move = now;
                 camera.fly_around(keyboard.view(), last_frame_time);
-                let rt_time = graphics.draw(camera, metrics.current_frame());
+                let rt_time = graphics.draw(settings, camera, metrics.current_frame());
                 metrics.advance_frame(rt_time);
             }
             (App::Running { keyboard, .. }, WindowEvent::KeyboardInput { event, .. }) => {

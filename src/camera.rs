@@ -1,9 +1,10 @@
 use crate::input::KeyboardView;
 use glam::{Quat, Vec2, Vec3};
 use std::time::Duration;
+use serde::{Deserialize, Serialize};
 use winit::keyboard::KeyCode;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct Camera {
     pub position: Vec3,
     pub view_distance: f32,

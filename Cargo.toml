@@ -12,7 +12,10 @@ wgpu = { version = "*" }
 env_logger = "*"
 pollster = "*"
 rand = "*"
-glam = { version = "*", features = ["bytemuck", "rand"] }
+glam = { version = "*", features = ["bytemuck", "rand", "serde"] }
 hashbrown = { version = "*" }
+toml = "*"
 self_cell = "1"
 bytemuck = { version = "1", features = ["derive", "zeroable_maybe_uninit"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }

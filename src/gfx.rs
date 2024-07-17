@@ -24,10 +24,7 @@ use wgpu::{
 use winit::dpi::PhysicalSize;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
-
-const SAMPLE_COUNT: usize = 32;
-const MAX_VERTEX_COUNT: usize = 8;
-const MAX_INDEX_COUNT: usize = 8;
+use crate::args::Settings;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -102,9 +99,9 @@ const VERTEX_POSITIONS: [Vec3; 7] = [
 ];
 
 const VERTEX_DIFFUSE: [Vec4; 7] = [
-    Vec4::new(0.5, 0.5, 1., 0.25),
-    Vec4::new(0.5, 1., 0.5, 0.5),
-    Vec4::new(0.5, 1., 1., 0.75),
+    Vec4::new(0.5, 0.5, 1., 0.),
+    Vec4::new(0.5, 1., 0.5, 0.),
+    Vec4::new(0.5, 1., 1., 0.),
     Vec4::new(1., 0.5, 0.5, 1.),
     Vec4::new(1., 0.5, 1., 1.),
     Vec4::new(1., 1., 0.5, 1.),
@@ -124,8 +121,8 @@ const VERTEX_SPECULAR: [Vec4; 7] = [
 const VERTEX_EMISSIVITY_ROUGHNESS: [Vec4; 7] = [
     Vec4::ZERO,
     Vec4::ZERO,
-    Vec4::ZERO,
-    Vec4::ZERO,
+    Vec4::new(0., 0., 0., 0.5),
+    Vec4::new(0., 0., 0., 0.5),
     Vec4::ZERO,
     Vec4::ZERO,
     Vec4::ZERO,
@@ -168,7 +165,7 @@ impl Graphics {
         );
     }
 
-    pub fn draw(&mut self, camera: &Camera, current_frame: u32) -> Duration {
+    pub fn draw(&mut self, settings: &Settings, camera: &Camera, current_frame: u32) -> Duration {
         let frame = self.renderer.surface.get_current_texture().unwrap();
         assert!(!frame.suboptimal);
         let texture = &frame.texture;
@@ -292,7 +289,7 @@ impl Graphics {
     }
 }
 
-pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Graphics> + 'static {
+pub fn create_graphics(event_loop: &ActiveEventLoop, settings: Settings) -> impl Future<Output = Graphics> + 'static {
     let instance = Instance::new(InstanceDescriptor {
         backends: Backends::VULKAN,
         flags: if cfg!(debug_assertions) {
@@ -349,9 +346,9 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             source: ShaderSource::Wgsl(Cow::Borrowed(
                 &std::fs::read_to_string("assets/shaders/raytracer.wgsl")
                     .unwrap()
-                    .replace("SAMPLE_COUNT", &SAMPLE_COUNT.to_string())
-                    .replace("MAX_VERTEX_COUNT", &MAX_VERTEX_COUNT.to_string())
-                    .replace("MAX_INDEX_COUNT", &MAX_INDEX_COUNT.to_string()),
+                    .replace("SAMPLE_COUNT", &settings.samples.to_string())
+                    .replace("MAX_VERTEX_COUNT", &settings.vertices.to_string())
+                    .replace("MAX_INDEX_COUNT", &settings.indices.to_string()),
             )),
         });
         let render_shader = device.create_shader_module(ShaderModuleDescriptor {
@@ -377,7 +374,7 @@ pub fn create_graphics(event_loop: &ActiveEventLoop) -> impl Future<Output = Gra
             count: None,
         };
 
-        let world_buffers = WorldBuffers::new(&device);
+        let world_buffers = WorldBuffers::new(&device, &settings);
 
         let world_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: None,
@@ -563,7 +560,7 @@ fn new_interface(device: &Device, size: PhysicalSize<u32>) -> Buffer {
 }
 
 impl WorldBuffers {
-    pub fn new(device: &Device) -> Self {
+    pub fn new(device: &Device, settings: &Settings) -> Self {
         let meshlet_data = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
             contents: bytes_of(&MeshletData {
@@ -573,14 +570,14 @@ impl WorldBuffers {
             }),
             usage: BufferUsages::UNIFORM,
         });
-        let mut buffer = vec![0u8; 16 * MAX_INDEX_COUNT];
+        let mut buffer = vec![0u8; 16 * settings.indices];
         buffer[..16 * INDICES.len()].copy_from_slice(bytes_of(&INDICES.map(|i| [i, i, i, i])));
         let indices = device.create_buffer_init(&BufferInitDescriptor {
             label: None,
             contents: &buffer,
             usage: BufferUsages::UNIFORM,
         });
-        buffer.resize(16 * MAX_VERTEX_COUNT, 0);
+        buffer.resize(16 * settings.vertices, 0);
         buffer[..16 * VERTEX_POSITIONS.len()]
             .copy_from_slice(bytes_of(&VERTEX_POSITIONS.map(|p| p.extend(f32::NAN))));
         let position = device.create_buffer_init(&BufferInitDescriptor {
